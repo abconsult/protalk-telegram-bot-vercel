@@ -1,6 +1,7 @@
 import os
 
 TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+WEBHOOK_SECRET       = os.getenv("WEBHOOK_SECRET", "")  # Used to secure Telegram Webhook endpoint
 PROTALK_BOT_ID       = os.getenv("PROTALK_BOT_ID", "23141")
 PROTALK_TOKEN        = os.getenv("PROTALK_TOKEN", "")
 PROTALK_FUNCTION_ID  = os.getenv("PROTALK_FUNCTION_ID", "609")
