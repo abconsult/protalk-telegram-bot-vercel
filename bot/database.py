@@ -34,20 +34,37 @@ def add_credits(user_id: int, amount: int) -> int:
     return new_val
 
 def set_user_state(user_id: int, state: dict):
-    kv.set(state_key(user_id), state)
+    # Ensure we store it as a JSON string so retrieval is consistent
+    kv.set(state_key(user_id), json.dumps(state))
 
 def get_user_state(user_id: int) -> dict:
     val = kv.get(state_key(user_id))
-    return val if val else {}
+    if not val:
+        return {}
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except json.JSONDecodeError:
+            return {}
+    if isinstance(val, dict):
+        return val
+    return {}
 
 def save_pending(user_id: int, payload: dict):
-    kv.set(pending_key(user_id), payload)
+    kv.set(pending_key(user_id), json.dumps(payload))
 
 def pop_pending(user_id: int) -> dict:
     val = kv.get(pending_key(user_id))
     if val:
         kv.delete(pending_key(user_id))
-    return val
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except:
+                pass
+        if isinstance(val, dict):
+            return val
+    return None
 
 # ---- Statistics & Analytics ----
 
@@ -99,7 +116,7 @@ def save_postcard(user_id: int, file_id: str, caption: str):
     cards.insert(0, {"file_id": file_id, "caption": caption})
     cards = cards[:5]  # Keep only the last 5
     
-    kv.set(key, cards)
+    kv.set(key, json.dumps(cards))
 
 def get_postcards(user_id: int) -> list:
     """Returns the user's saved postcards"""
