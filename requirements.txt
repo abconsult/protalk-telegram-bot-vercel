@@ -5,6 +5,7 @@ pydantic==2.6.3
 upstash-redis==1.1.0
 aiohttp==3.9.3
 Pillow==10.2.0
+tenacity==8.2.3
 
 # Testing
 pytest==8.0.0
