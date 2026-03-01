@@ -6,7 +6,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile
 from aiogram.utils.deep_linking import create_start_link
 
-from bot.config import ADMIN_ID, OCCASIONS, STYLES, FONTS_LIST, PACKAGES, YUKASSA_TOKEN
+from bot.config import ADMIN_ID, OCCASIONS, STYLES, FONTS_LIST, PACKAGES, YUKASSA_TOKEN, MAX_CUSTOM_TEXT_LENGTH
 from bot.database import (
     kv, credits_key, get_credits, set_user_state, get_user_state,
     add_credits, pending_key, pop_pending, save_pending,
@@ -329,8 +329,16 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             await message.answer("Пожалуйста, отправьте текст.")
             return
             
+        # Optional: General text length limit to prevent abuse
+        if len(text_input) > 500:
+            await message.answer("Текст слишком длинный. Пожалуйста, сделайте его короче (максимум 500 символов).")
+            return
+            
         # 1. Waiting for custom occasion text
         if st.get("occasion") == "WAITING_CUSTOM_OCCASION":
+            if len(text_input) > 50:
+                await message.answer("Название повода слишком длинное. Пожалуйста, уложитесь в 50 символов.")
+                return
             st["occasion"] = f"✏️ {text_input}"
             set_user_state(chat_id, st)
             await message.answer("Отлично! Теперь выберите стиль:", reply_markup=build_style_keyboard())
@@ -343,12 +351,16 @@ def register_handlers(dp: Dispatcher, bot: Bot):
 
         # 3. Waiting for addressee name (both AI and custom modes go through here first)
         if st.get("addressee") is None:
+            if len(text_input) > 50:
+                await message.answer("Имя адресата слишком длинное. Пожалуйста, напишите короче.")
+                return
+                
             st["addressee"] = text_input
             set_user_state(chat_id, st)
 
             if st["text_mode"] == "custom":
                 # Custom mode: after name, ask for the greeting text
-                await message.answer("Напишите свой текст поздравления (2-3 короткие фразы):")
+                await message.answer(f"Напишите свой текст поздравления (максимум {MAX_CUSTOM_TEXT_LENGTH} символов):")
             else:
                 # AI mode: name captured, generate now
                 payload = {
@@ -372,7 +384,14 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                     )
             return
 
-        # 4. Custom mode only: greeting text received -> generate postcard
+        # 4. Custom mode only: greeting text received -> check length -> generate postcard
+        if len(text_input) > MAX_CUSTOM_TEXT_LENGTH:
+            await message.answer(
+                f"Текст слишком длинный ({len(text_input)} символов). "
+                f"Пожалуйста, уложитесь в {MAX_CUSTOM_TEXT_LENGTH} символов, чтобы он красиво смотрелся на открытке."
+            )
+            return
+
         payload = {
             "occasion": st["occasion"],
             "style": st["style"],
