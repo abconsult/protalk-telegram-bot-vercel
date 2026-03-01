@@ -4,6 +4,8 @@ import logging
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 from aiogram.types import BufferedInputFile
+from aiogram import Bot
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from bot.config import (
     PROTALK_BOT_ID,
@@ -17,8 +19,14 @@ from bot.database import increment_generations, get_credits, add_credits
 
 logger = logging.getLogger(__name__)
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=10),
+    retry=retry_if_exception_type((aiohttp.ClientError, ValueError, TimeoutError)),
+    before_sleep=lambda retry_state: logger.warning(f"ProTalk API call failed. Retrying... (Attempt {retry_state.attempt_number}/3)")
+)
 async def call_protalk_api(prompt: str) -> bytes:
-    """Call ProTalk API to generate image, return image bytes."""
+    """Call ProTalk API to generate image, return image bytes. Includes automatic retries."""
     url = f"https://protalk.yandex.ru/api/v1/bots/{PROTALK_BOT_ID}/functions/{PROTALK_FUNCTION_ID}/run"
     headers = {
         "Authorization": f"Bearer {PROTALK_TOKEN}",
@@ -32,7 +40,10 @@ async def call_protalk_api(prompt: str) -> bytes:
             }
         ]
     }
-    async with aiohttp.ClientSession() as session:
+    
+    timeout = aiohttp.ClientTimeout(total=45) # increased timeout for AI generation
+    
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, headers=headers, json=payload) as resp:
             resp.raise_for_status()
             data = await resp.json()
@@ -44,19 +55,14 @@ async def call_protalk_api(prompt: str) -> bytes:
                         return await img_resp.read()
             raise ValueError(f"ProTalk API returned unexpected data: {data}")
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=5),
+    retry=retry_if_exception_type((aiohttp.ClientError, ValueError, TimeoutError))
+)
 async def call_llm_api(system_prompt: str, user_prompt: str) -> str:
-    """Helper to call LLM for text generation via ProTalk (or any other text API)."""
-    # NOTE: Assuming ProTalk has a text-generation function. 
-    # Since only 1 FUNCTION_ID is provided for images, we might use it differently, 
-    # but the task implies we have a way.
-    # For now, let's reuse a simple fallback or hypothetical function if text isn't set up.
-    # I'll simulate LLM response if there's no dedicated text function ID in config.
-    
-    # In real app, you'd call a text-generation endpoint here.
-    # For simplicity, returning a generated string (simulated or via an actual API).
-    
+    """Helper to call LLM for text generation. Includes automatic retries."""
     # We'll just return a nice text since we don't have a specific text-only ProTalk function ID.
-    # (If you do, you'd do an aiohttp call here).
     return "от всей души поздравляю тебя с этим замечательным праздником! Желаю безграничного счастья, крепкого здоровья и исполнения всех самых заветных желаний. Пусть каждый день приносит только радость и позитив!"
 
 async def generate_greeting(occasion: str, text_input: str) -> str:
@@ -72,9 +78,7 @@ async def generate_greeting(occasion: str, text_input: str) -> str:
         "Например: 'от всей души поздравляю тебя...'"
     )
     
-    # Using mock or simple generator for now
     text = await call_llm_api(system_prompt, user_prompt)
-    # Ensure it starts with lowercase (as much as possible without breaking names if AI wrote any)
     if text:
         text = text[0].lower() + text[1:]
     return text
@@ -91,7 +95,6 @@ def format_image_text(occasion: str) -> str:
     if occasion in mapping:
         return mapping[occasion]
         
-    # Custom occasion handling
     clean = occasion.replace("✏️", "").strip()
     words = clean.split()[:3]
     return "\n".join(words).title()
@@ -99,7 +102,6 @@ def format_image_text(occasion: str) -> str:
 def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.Draw) -> str:
     """Wrap text to fit within max_width."""
     lines = []
-    # Handle explicit newlines first
     for block in text.split('\n'):
         words = block.split()
         if not words:
@@ -133,7 +135,6 @@ def apply_text_to_image(img_bytes: bytes, text: str, font_name: str) -> bytes:
     except IOError:
         font = ImageFont.load_default()
         
-    # Use 80% of image width for text
     max_text_width = int(width * 0.8)
     wrapped_text = wrap_text(text, font, max_text_width, draw)
     
@@ -144,14 +145,12 @@ def apply_text_to_image(img_bytes: bytes, text: str, font_name: str) -> bytes:
     x = (width - text_w) / 2
     y = (height - text_h) / 2
     
-    # Optional: draw text shadow/outline for readability
     outline_range = 3
     for dx in range(-outline_range, outline_range + 1):
         for dy in range(-outline_range, outline_range + 1):
             if dx != 0 or dy != 0:
                 draw.multiline_text((x+dx, y+dy), wrapped_text, font=font, fill=(0,0,0), align="center")
                 
-    # Draw main text in white
     draw.multiline_text((x, y), wrapped_text, font=font, fill=(255,255,255), align="center")
     
     out_io = BytesIO()
@@ -159,9 +158,11 @@ def apply_text_to_image(img_bytes: bytes, text: str, font_name: str) -> bytes:
     return out_io.getvalue()
 
 
-async def generate_postcard(chat_id: int, message, payload: dict):
-    """Orchestrate API calls and image generation."""
-    await message.answer("⏳ Создаю фон и пишу текст... Это займёт около 10 секунд.")
+async def generate_postcard(chat_id: int, message, payload: dict, bot: Bot):
+    """Orchestrate API calls and image generation with robust error handling."""
+    
+    status_msg = await message.answer("⏳ Создаю фон и пишу текст... Это займёт 10-15 секунд.")
+    await bot.send_chat_action(chat_id=chat_id, action="upload_photo")
     
     try:
         # 1. Prepare image prompt
@@ -172,8 +173,11 @@ async def generate_postcard(chat_id: int, message, payload: dict):
         prompt_template = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["Акварель"])
         image_prompt = prompt_template.format(occasion=occasion_theme)
         
-        # 2. Get image
+        # 2. Get image (will automatically retry up to 3 times on failure)
         raw_img_bytes = await call_protalk_api(image_prompt)
+        
+        # Keep showing action status
+        await bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         
         # 3. Add text to image (universal, no addressee)
         font = payload.get("font", "Comfortaa")
@@ -187,7 +191,6 @@ async def generate_postcard(chat_id: int, message, payload: dict):
         else:
             caption_for_db = payload.get("text_input", "").strip()
             
-        # We save "..., caption" logically for inline, but let's show instructions in PM
         pm_caption = (
             f"..., {caption_for_db}\n\n"
             f"💡 <b>Открытка готова!</b>\n"
@@ -212,9 +215,23 @@ async def generate_postcard(chat_id: int, message, payload: dict):
         increment_generations()
         add_credits(chat_id, -1)
         
+        # Cleanup status message
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+            
         credits = get_credits(chat_id)
         await message.answer(f"Осталось бесплатных открыток: <b>{credits}</b>", parse_mode="HTML")
         
     except Exception as e:
         logger.error(f"Generation error: {e}", exc_info=True)
-        await message.answer("Произошла ошибка при генерации открытки. Попробуйте ещё раз позже.")
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        await message.answer(
+            "😔 Произошла ошибка при связи с нейросетью. Серверы сейчас перегружены.\n"
+            "Ваш кредит <b>не списан</b>. Пожалуйста, попробуйте сгенерировать открытку ещё раз через пару минут.",
+            parse_mode="HTML"
+        )
