@@ -41,10 +41,10 @@ FONTS_LIST = [
 ]
 
 FONTS_FILES = {
-    "Lobster": "Lobster-Regular.ttf",
-    "Caveat": "Caveat-Regular.ttf",
-    "Pacifico": "Pacifico-Regular.ttf",
-    "Comfortaa": "Comfortaa-Regular.ttf",
+    "Lobster": "fonts/Lobster-Regular.ttf",
+    "Caveat": "fonts/Caveat-Regular.ttf",
+    "Pacifico": "fonts/Pacifico-Regular.ttf",
+    "Comfortaa": "fonts/Comfortaa-Regular.ttf",
 }
 
 # Map EXACTLY the strings from OCCASIONS list (with emojis) to the prompt themes
