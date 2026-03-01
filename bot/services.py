@@ -1,23 +1,39 @@
-import io
 import os
-import uuid
-import json
 import aiohttp
-import asyncio
-import urllib.parse
 import logging
+from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
-from aiogram import types
 from aiogram.types import BufferedInputFile
+from aiogram import Bot
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from bot.config import (
-    PROTALK_FUNCTION_ID, PROTALK_BOT_ID, PROTALK_TOKEN, 
-    OCCASION_TEXT_MAP, STYLE_PROMPT_MAP, FONTS_FILES
+    PROTALK_BOT_ID,
+    PROTALK_TOKEN,
+    PROTALK_FUNCTION_ID,
+    STYLE_PROMPT_MAP,
+    FONTS_FILES,
+    OCCASION_TEXT_MAP,
 )
-from bot.database import consume_credit, set_user_state, record_generation
-from bot.keyboards import build_occasion_keyboard
+from bot.database import increment_generations, get_credits, add_credits
 
 logger = logging.getLogger(__name__)
+
+async def fetch_with_retry(url: str, session: aiohttp.ClientSession, retries: int = 3, delay: int = 2) -> aiohttp.ClientResponse:
+    """Wrapper to make HTTP requests with automatic retries on failure."""
+    for attempt in range(retries):
+        try:
+            resp = await session.get(url)
+            if resp.status == 200:
+                return resp
+            logger.warning(f"Attempt {attempt + 1}: Received status {resp.status} for {url}")
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1}: Exception connecting to API: {e}")
+            
+        if attempt < retries - 1:
+            await asyncio.sleep(delay)
+            
+    raise Exception(f"Failed to fetch data after {retries} attempts.")
 
 
 async def get_greeting_text_from_protalk(name: str, occasion: str) -> str:
@@ -25,49 +41,44 @@ async def get_greeting_text_from_protalk(name: str, occasion: str) -> str:
         f"Напиши короткое красивое поздравление на русском языке. "
         f"Получатель: {name}. Повод: {occasion}. "
         f"Стиль: тёплый, искренний, 2-3 предложения максимум. "
-        f"Ответь ТОЛЬКО текстом поздравления, без кавычек и пояснений. Не используй списки или нумерацию."
+        f"Ответь ТОЛЬКО текстом поздравления, без кавычек и пояснений."
     )
 
-    bot_chat_id = f"ask{uuid.uuid4().hex[:8]}"
-    send_url = f"https://api.pro-talk.ru/api/v1.0/ask/{PROTALK_TOKEN}"
+    protalk_url = (
+        "https://api.pro-talk.ru/api/v1.0/run_function_get"
+        f"?function_id={PROTALK_FUNCTION_ID}"
+        f"&bot_id={PROTALK_BOT_ID}"
+        f"&bot_token={PROTALK_TOKEN}"
+        f"&prompt={urllib.parse.quote(meta_prompt)}"
+        f"&output=text"
+    )
+    
+    text = await call_llm_api(system_prompt, user_prompt)
+    if text:
+        text = text[0].lower() + text[1:]
+    return text
 
-    payload_send = {
-        "bot_id": int(PROTALK_BOT_ID),
-        "chat_id": bot_chat_id,
-        "message": meta_prompt
+def format_image_text(occasion: str) -> str:
+    """Return short universal text to put on the image based on occasion."""
+    mapping = {
+        "🎂 День рождения": "С Днём\nРождения!",
+        "💍 Свадьба": "С Днём\nСвадьбы!",
+        "👶 Рождение ребёнка": "С Новорожденным!",
+        "🌸 8 марта": "С 8 Марта!",
+        "🎓 Завершение учёбы": "С Выпуском!",
     }
+    if occasion in mapping:
+        return mapping[occasion]
+        
+    clean = occasion.replace("✏️", "").strip()
+    words = clean.split()[:3]
+    return "\n".join(words).title()
 
-    fallback = f"С праздником, {name}! 🎉"
-
-    logger.info(f"Sending text generation request to ProTalk: URL={send_url}, payload={json.dumps(payload_send, ensure_ascii=False)}")
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(send_url, json=payload_send) as resp:
-                if resp.status != 200:
-                    logger.error(f"ProTalk /ask error: HTTP {resp.status}")
-                    return fallback
-                
-                data = await resp.json()
-                logger.info(f"ProTalk text generation response: {json.dumps(data, ensure_ascii=False)}")
-
-                text = data.get("done", "")
-                if text:
-                    return text.strip()
-                else:
-                    logger.warning("ProTalk returned empty 'done' message in synchronous call")
-                    return fallback
-
-    except Exception as e:
-        logger.error(f"Error fetching greeting text: {e}", exc_info=True)
-        return fallback
-
-
-def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> str:
-    """Wrap text to fit within max_width based on the given font."""
+def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.Draw) -> str:
+    """Wrap text to fit within max_width."""
     lines = []
-    for paragraph in text.split('\n'):
-        words = paragraph.split()
+    for block in text.split('\n'):
+        words = block.split()
         if not words:
             lines.append("")
             continue
@@ -77,33 +88,43 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: Ima
             test_line = current_line + " " + word
             bbox = draw.textbbox((0, 0), test_line, font=font)
             width = bbox[2] - bbox[0]
-            
             if width <= max_width:
                 current_line = test_line
             else:
                 lines.append(current_line)
                 current_line = word
         lines.append(current_line)
-        
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
+def apply_text_to_image(img_bytes: bytes, text: str, font_name: str) -> bytes:
+    """Draw text onto the center of the image."""
+    image = Image.open(BytesIO(img_bytes)).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    
+    font_path = os.path.join(os.path.dirname(__file__), "..", FONTS_FILES.get(font_name, FONTS_FILES["Comfortaa"]))
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await fetch_with_retry(protalk_url, session, retries=3)
+            raw = await resp.text()
+            
+            try:
+                result = json.loads(raw)
+                text = (
+                    (result.get("result") if isinstance(result, dict) else None)
+                    or (result.get("text") if isinstance(result, dict) else None)
+                    or (result.get("response") if isinstance(result, dict) else None)
+                    or (raw if isinstance(result, str) else "")
+                )
+            except json.JSONDecodeError:
+                text = raw
 
-def format_image_text(addressee: str, occasion_text: str, is_custom: bool) -> str:
-    """Format the short greeting for the image based on occasion."""
-    if is_custom:
-        return f"{addressee}, поздравляю!"
-    elif occasion_text == "день рождения":
-        return f"{addressee}, с Днём Рождения!"
-    elif occasion_text == "свадьбу":
-        return f"{addressee}, с Днём Свадьбы!"
-    elif occasion_text == "рождение ребёнка":
-        return f"{addressee}, с новорожденным!"
-    elif occasion_text == "8 марта":
-        return f"{addressee}, с днём 8 марта!"
-    elif occasion_text == "завершение учёбы":
-        return f"{addressee}, с выпускным!"
-    else:
-        return f"{addressee}, поздравляю!"
+            text = (text or "").strip()
+            return text or fallback
+    except Exception as e:
+        logger.error(f"Error fetching greeting text (all retries failed): {e}", exc_info=True)
+        return fallback
 
 
 async def generate_postcard(chat_id: int, message: types.Message, payload: dict):
@@ -111,36 +132,17 @@ async def generate_postcard(chat_id: int, message: types.Message, payload: dict)
     style = payload["style"]
     text_mode = payload.get("text_mode", "ai")
     text_input = payload["text_input"]
-    addressee = payload.get("addressee") or text_input
 
-    wait_msg = await message.answer("⏳ Рисую открытку, подождите...")
+    wait_msg = await message.answer("⏳ Рисую открытку, это может занять до минуты. Подождите...")
 
     is_custom = occasion.startswith("✏️ ")
     if is_custom:
         occasion_text = occasion.replace("✏️ ", "").strip()
     else:
-        occasion_text = OCCASION_TEXT_MAP.get(occasion) or OCCASION_TEXT_MAP.get(occasion.strip())
-        if not occasion_text:
-             for key, val in OCCASION_TEXT_MAP.items():
-                 if key in occasion or occasion in key or key.split(" ")[-1] in occasion:
-                     occasion_text = val
-                     break
-        if not occasion_text:
-             logger.error(f"Failed to map occasion exact match: '{occasion}'. Using default.")
-             occasion_text = "праздник"
+        occasion_text = next((v for k, v in OCCASION_TEXT_MAP.items() if k in occasion), "праздник")
 
     prompt_template = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["Минимализм"])
-
-    # For custom occasions, use a neutral theme so the model doesn't try to
-    # render the custom text as glyphs/signs on the generated background.
-    occasion_for_prompt = "праздник" if is_custom else occasion_text
-    image_prompt = prompt_template.format(occasion=occasion_for_prompt)
-    image_prompt += (
-        " ABSOLUTELY NO TEXT, NO TYPOGRAPHY, no letters, no words, no numbers,"
-        " no symbols, no signage, no labels, no logos, no watermark, no signature,"
-        " no stamps, no captions, no calligraphy, no handwriting, no headlines."
-        " Blank clean center, clean background."
-    )
+    image_prompt = prompt_template.format(occasion=occasion_text)
 
     image_url = (
         "https://api.pro-talk.ru/api/v1.0/run_function_get"
@@ -151,100 +153,89 @@ async def generate_postcard(chat_id: int, message: types.Message, payload: dict)
         f"&output=image"
     )
 
-    logger.info(f"Sending image generation request to ProTalk: prompt='{image_prompt}'")
-
     try:
         async with aiohttp.ClientSession() as session:
             async def fetch_image():
-                async with session.get(image_url) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"Image API Error: HTTP {resp.status}")
-                    return await resp.read()
+                resp = await fetch_with_retry(image_url, session, retries=3, delay=5)
+                return await resp.read()
 
             if text_mode == "ai":
-                image_bytes, caption_text = await asyncio.gather(
+                image_bytes, greeting_caption = await asyncio.gather(
                     fetch_image(),
                     get_greeting_text_from_protalk(text_input, occasion_text),
                 )
             else:
                 image_bytes = await fetch_image()
-                caption_text = text_input.strip()[:1024]
+                greeting_caption = "Ваша открытка готова! ✨"
 
         img = Image.open(io.BytesIO(image_bytes))
         draw = ImageDraw.Draw(img)
 
-        # Short occasion-based greeting on the image
-        text_to_draw = format_image_text(addressee, occasion_text, is_custom)
-
-        chosen_font_name = payload.get("font", "Lobster")
-        font_filename = FONTS_FILES.get(chosen_font_name, "Lobster-Regular.ttf")
-
-        max_text_width = int(img.width * 0.8)
-        max_text_height = int(img.height * 0.8)
-
-        font_size = 100
-        try:
-            font_path = os.path.join(os.path.dirname(__file__), "..", font_filename)
-            font = ImageFont.truetype(font_path, font_size)
-
-            wrapped_text = wrap_text(text_to_draw, font, max_text_width, draw)
-
-            while True:
-                bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-                
-                if (text_width <= max_text_width and text_height <= max_text_height) or font_size <= 20:
-                    break
-                
-                font_size -= 5
-                font = ImageFont.truetype(font_path, font_size)
-                wrapped_text = wrap_text(text_to_draw, font, max_text_width, draw)
-                
-            text_to_draw = wrapped_text
-
-        except IOError:
-            font = ImageFont.load_default()
-            wrapped_text = wrap_text(text_to_draw, font, max_text_width, draw)
-            text_to_draw = wrapped_text
-
-        bbox = draw.multiline_textbbox((0, 0), text_to_draw, font=font, align="center")
-        text_width  = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        x = (img.width  - text_width)  / 2
-        y = (img.height - text_height) / 2
-
-        text_color = (200, 30, 30)
-        if occasion_text in ("рождение ребёнка", "8 марта"):
-            text_color = (219, 112, 147)
-        elif occasion_text == "свадьбу":
-            text_color = (218, 165, 32)
-        elif is_custom:
-            text_color = (50, 100, 200)
-
-        draw.multiline_text((x + 2, y + 2), text_to_draw, font=font, fill=(50, 50, 50), align="center")
-        draw.multiline_text((x, y),          text_to_draw, font=font, fill=text_color,  align="center")
-
-        output_buffer = io.BytesIO()
-        img.save(output_buffer, format="JPEG", quality=90)
-        final_image_bytes = output_buffer.getvalue()
-
-        photo = BufferedInputFile(final_image_bytes, filename="postcard.jpg")
-
-        await message.answer_photo(photo=photo, caption=caption_text)
-
-        left = consume_credit(chat_id)
-        record_generation()
-
-        await message.answer(
-            f"✅ Списан 1 кредит. Осталось: {left}\n\n"
-            f"Хотите ещё одну? Выберите повод:",
-            reply_markup=build_occasion_keyboard(),
+        if text_mode == "ai":
+            if occasion_text == "день рождения":
+                text_to_draw = f"С Днём Рождения,\n{text_input}!"
+            elif occasion_text == "свадьбу":
+                text_to_draw = f"{text_input},\nс днём свадьбы!"
+            elif occasion_text == "рождение ребёнка":
+                text_to_draw = f"{text_input},\nс новорожденным!"
+            elif occasion_text == "8 марта":
+                text_to_draw = f"{text_input},\nс 8 Марта!"
+            elif occasion_text == "завершение учёбы":
+                text_to_draw = f"{text_input},\nс завершением учёбы!"
+            else:
+                text_to_draw = f"{text_input},\nпоздравляю!"
+        else:
+            caption_for_db = payload.get("text_input", "").strip()
+            
+        pm_caption = (
+            f"..., {caption_for_db}\n\n"
+            f"💡 <b>Открытка готова!</b>\n"
+            f"Чтобы отправить её с именем, напишите в любом чате:\n"
+            f"<code>@pozdravish_bot Имя</code>"
         )
-        set_user_state(chat_id, {"occasion": None, "style": None, "font": None, "text_mode": None, "addressee": None})
+        
+        # Send result
+        msg = await message.answer_photo(
+            photo=BufferedInputFile(final_img_bytes, filename="postcard.jpg"),
+            caption=pm_caption,
+            parse_mode="HTML"
+        )
+        
+        # Save to DB for inline mode
+        from bot.database import save_postcard
+        if msg and msg.photo:
+            file_id = msg.photo[-1].file_id
+            save_postcard(chat_id, file_id, caption_for_db)
+        
+        # Increment stats & deduct credits
+        increment_generations()
+        add_credits(chat_id, -1)
+        
+        # Cleanup status message
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+            
+        credits = get_credits(chat_id)
+        await message.answer(f"Осталось бесплатных открыток: <b>{credits}</b>", parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Generation error: {e}", exc_info=True)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        await message.answer(
+            f"😔 Произошла ошибка при связи с нейросетью. Серверы сейчас перегружены.\n"
+            f"<b>Код ошибки:</b> {str(e)[:100]}\n"
+            f"Ваш кредит <b>не списан</b>. Пожалуйста, попробуйте сгенерировать открытку ещё раз через пару минут.",
+            parse_mode="HTML"
+        )
+        set_user_state(chat_id, {"occasion": None, "style": None, "font": None, "text_mode": None})
 
     except Exception as e:
         logger.error(f"Error in generate_postcard: {e}", exc_info=True)
-        await message.answer("❌ Ошибка при генерации. Попробуйте ещё раз.")
+        await message.answer("❌ Сервер генерации временно не отвечает. Пожалуйста, попробуйте чуть позже.")
     finally:
         await wait_msg.delete()

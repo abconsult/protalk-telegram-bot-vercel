@@ -1,6 +1,7 @@
 import os
 
 TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+WEBHOOK_SECRET       = os.getenv("WEBHOOK_SECRET", "")  # Used to secure Telegram Webhook endpoint
 PROTALK_BOT_ID       = os.getenv("PROTALK_BOT_ID", "23141")
 PROTALK_TOKEN        = os.getenv("PROTALK_TOKEN", "")
 PROTALK_FUNCTION_ID  = os.getenv("PROTALK_FUNCTION_ID", "609")
@@ -8,6 +9,7 @@ YUKASSA_TOKEN        = os.getenv("YUKASSA_PROVIDER_TOKEN", "")
 ADMIN_ID             = int(os.getenv("ADMIN_ID", "128247430"))
 
 FREE_CREDITS = 3
+MAX_CUSTOM_TEXT_LENGTH = 300  # Maximum characters allowed for custom greeting text
 
 PACKAGES = {
     3:  {"rub": 90, "amount": 9000, "label": "Пакет: 3 открытки"},

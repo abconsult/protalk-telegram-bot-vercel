@@ -1,17 +1,19 @@
 import os
 import asyncio
 import logging
+import traceback
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile
+from aiogram.types import LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile, InlineQueryResultCachedPhoto
 from aiogram.utils.deep_linking import create_start_link
 
-from bot.config import ADMIN_ID, OCCASIONS, STYLES, FONTS_LIST, PACKAGES, YUKASSA_TOKEN
+from bot.config import ADMIN_ID, OCCASIONS, STYLES, FONTS_LIST, PACKAGES, YUKASSA_TOKEN, MAX_CUSTOM_TEXT_LENGTH
 from bot.database import (
     kv, credits_key, get_credits, set_user_state, get_user_state,
     add_credits, pending_key, pop_pending, save_pending,
     record_new_user, get_total_users, get_total_generations, 
-    get_total_revenue, record_payment, get_all_users, is_user_exists
+    get_total_revenue, record_payment, get_all_users, is_user_exists,
+    get_postcards
 )
 from bot.keyboards import (
     build_occasion_keyboard, build_style_keyboard,
@@ -25,26 +27,8 @@ logger = logging.getLogger(__name__)
 REFERRAL_BONUS_INVITER = 2
 REFERRAL_BONUS_INVITEE = 1
 
-DEFAULT_STATE = {"occasion": None, "style": None, "font": None, "text_mode": None, "addressee": None}
-
-# Occasion -> addressee question
-ADDRESSEE_PROMPT = {
-    "🎂 День рождения":  "Напишите, пожалуйста, имя именинника:",
-    "💍 Свадьба":            "Напишите, пожалуйста, имена молодожёнов:",
-    "👶 Рождение ребёнка":   "Напишите, пожалуйста, имена родителей:",
-    "🌸 8 марта":            "Напишите, пожалуйста, имя адресата (например: Мама, Любимая, Коллеги):",
-    "🎓 Завершение учёбы":  "Напишите, пожалуйста, имя выпускника:",
-}
-ADDRESSEE_PROMPT_DEFAULT = "Напишите, пожалуйста, имя адресата:"
-
-
-def get_addressee_prompt(occasion: str) -> str:
-    """Return the occasion-specific question to ask for addressee name."""
-    # Custom occasion (starts with pencil emoji)
-    if occasion.startswith("✏️ ") or occasion == "WAITING_CUSTOM_OCCASION":
-        return ADDRESSEE_PROMPT_DEFAULT
-    return ADDRESSEE_PROMPT.get(occasion, ADDRESSEE_PROMPT_DEFAULT)
-
+# State tracking (addressee is no longer needed)
+DEFAULT_STATE = {"occasion": None, "style": None, "font": None, "text_mode": None}
 
 def register_handlers(dp: Dispatcher, bot: Bot):
     
@@ -108,6 +92,56 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         chat_id = message.chat.id
         set_user_state(chat_id, DEFAULT_STATE.copy())
         await message.answer("🧹 Состояние очищено. Начните заново с /start")
+
+    # ---------------- INLINE MODE ----------------
+    
+    @dp.inline_query()
+    async def inline_query_handler(inline_query: types.InlineQuery):
+        name = inline_query.query.strip()
+        user_id = inline_query.from_user.id
+        
+        postcards = get_postcards(user_id)
+        if not postcards:
+            # User has no postcards saved yet
+            await inline_query.answer(
+                results=[],
+                cache_time=1,
+                is_personal=True,
+                switch_pm_text="✨ Создать открытку",
+                switch_pm_parameter="create"
+            )
+            return
+
+        results = []
+        for idx, pc in enumerate(postcards):
+            caption_text = pc.get("caption", "")
+            
+            # Form the final caption depending on if a name was typed
+            if name:
+                # e.g., "Маша, от всей души поздравляю..."
+                first_letter = caption_text[0].lower() if caption_text else ""
+                rest = caption_text[1:] if len(caption_text) > 1 else ""
+                final_caption = f"{name}, {first_letter}{rest}"
+            else:
+                # Just show how it will look
+                final_caption = f"..., {caption_text}"
+            
+            results.append(
+                InlineQueryResultCachedPhoto(
+                    id=str(idx),
+                    photo_file_id=pc['file_id'],
+                    caption=final_caption
+                )
+            )
+        
+        await inline_query.answer(
+            results,
+            cache_time=1,
+            is_personal=True,
+            switch_pm_text="➕ Создать ещё",
+            switch_pm_parameter="create"
+        )
+
 
     # ---------------- USER FLOW ----------------
 
@@ -182,7 +216,6 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                 "style": None,
                 "font": None,
                 "text_mode": None,
-                "addressee": None,
             }
             set_user_state(chat_id, st)
             await message.answer("Пожалуйста, напишите свой повод (например: День программиста, Годовщина знакомства):", reply_markup=types.ReplyKeyboardRemove())
@@ -193,36 +226,53 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             "style": None,
             "font": None,
             "text_mode": None,
-            "addressee": None,
         }
         set_user_state(chat_id, st)
         await message.answer("Теперь выберите стиль:", reply_markup=build_style_keyboard())
 
     @dp.message(F.text.in_(STYLES))
     async def choose_style(message: types.Message):
-        chat_id = message.chat.id
-        st = get_user_state(chat_id)
-        if not st.get("occasion") or st.get("occasion") == "WAITING_CUSTOM_OCCASION":
-            await message.answer("Сначала выберите повод:", reply_markup=build_occasion_keyboard())
-            return
-            
-        st["style"] = message.text
-        st["font"] = None
-        st["text_mode"] = None
-        st["addressee"] = None
-        set_user_state(chat_id, st)
-
-        preview_path = os.path.join(os.path.dirname(__file__), "..", "fonts_preview.jpg")
         try:
-            with open(preview_path, "rb") as f:
-                preview_bytes = f.read()
-            await message.answer_photo(
-                photo=BufferedInputFile(preview_bytes, filename="fonts_preview.jpg"),
-                caption="Отлично! Теперь выберите шрифт для надписи:",
-                reply_markup=build_font_keyboard()
-            )
-        except FileNotFoundError:
-            await message.answer("Отлично! Теперь выберите шрифт для надписи:", reply_markup=build_font_keyboard())
+            logger.info(f"===> user selected style: {message.text}")
+            chat_id = message.chat.id
+            st = get_user_state(chat_id)
+            logger.info(f"===> current state: {st}")
+            
+            if not st.get("occasion") or st.get("occasion") == "WAITING_CUSTOM_OCCASION":
+                logger.info("===> returning to choose occasion")
+                await message.answer("Сначала выберите повод:", reply_markup=build_occasion_keyboard())
+                return
+                
+            st["style"] = message.text
+            st["font"] = None
+            st["text_mode"] = None
+            
+            logger.info(f"===> saving state: {st}")
+            set_user_state(chat_id, st)
+            logger.info("===> state saved successfully")
+
+            # Try to send the font preview image, fallback to text if missing
+            preview_path = os.path.join(os.path.dirname(__file__), "..", "fonts", "fonts_preview.jpg")
+            try:
+                with open(preview_path, "rb") as f:
+                    preview_bytes = f.read()
+                await message.answer_photo(
+                    photo=BufferedInputFile(preview_bytes, filename="fonts_preview.jpg"),
+                    caption="Отлично! Теперь выберите шрифт для надписи:",
+                    reply_markup=build_font_keyboard()
+                )
+                logger.info("===> sent font preview image successfully")
+            except Exception as e:
+                logger.warning(f"Failed to read/send font preview image, sending text fallback: {e}")
+                await message.answer("Отлично! Теперь выберите шрифт для надписи:", reply_markup=build_font_keyboard())
+            
+        except Exception as e:
+            logger.error(f"CRITICAL ERROR in choose_style: {e}")
+            logger.error(traceback.format_exc())
+            try:
+                await message.answer(f"Произошла системная ошибка: {str(e)[:50]}. Напишите /start.")
+            except:
+                pass
 
     @dp.message(F.text.in_(FONTS_LIST))
     async def choose_font(message: types.Message):
@@ -235,7 +285,6 @@ def register_handlers(dp: Dispatcher, bot: Bot):
 
         st["font"] = message.text
         st["text_mode"] = None
-        st["addressee"] = None
         set_user_state(chat_id, st)
         
         await message.answer("Как напишем поздравление?", reply_markup=build_text_mode_keyboard())
@@ -251,12 +300,19 @@ def register_handlers(dp: Dispatcher, bot: Bot):
 
         mode = "ai" if message.text == "✨ Сгенерировать ИИ" else "custom"
         st["text_mode"] = mode
-        st["addressee"] = None  # will be captured in next step for both modes
         set_user_state(chat_id, st)
 
-        # Ask for recipient name with occasion-specific wording
-        prompt = get_addressee_prompt(st.get("occasion", ""))
-        await message.answer(prompt, reply_markup=types.ReplyKeyboardRemove())
+        # Ask for text instructions based on mode
+        if mode == "ai":
+            prompt = "Напишите коротко, для кого это поздравление и какие есть пожелания (например: для мамы от сына, крепкого здоровья и счастья):"
+        else:
+            prompt = (
+                "Напишите свой текст поздравления.\n"
+                "❗️ <b>ВАЖНО:</b> Не пишите имя адресата в начале. Начните сразу с сути (желательно с маленькой буквы).\n"
+                "Имя будет подставлено автоматически при отправке открытки."
+            )
+        
+        await message.answer(prompt, reply_markup=types.ReplyKeyboardRemove(), parse_mode="HTML")
 
     @dp.callback_query(F.data.startswith("buy:"))
     async def buy_package(query: CallbackQuery):
@@ -315,7 +371,7 @@ def register_handlers(dp: Dispatcher, bot: Bot):
 
         pending = pop_pending(chat_id)
         if pending:
-            await generate_postcard(chat_id, message, pending)
+            await generate_postcard(chat_id, message, pending, bot)
         else:
             await message.answer("Выберите повод для новой открытки:", reply_markup=build_occasion_keyboard())
 
@@ -329,8 +385,16 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             await message.answer("Пожалуйста, отправьте текст.")
             return
             
+        # Optional: General text length limit to prevent abuse
+        if len(text_input) > 500:
+            await message.answer("Текст слишком длинный. Пожалуйста, сделайте его короче (максимум 500 символов).")
+            return
+            
         # 1. Waiting for custom occasion text
         if st.get("occasion") == "WAITING_CUSTOM_OCCASION":
+            if len(text_input) > 50:
+                await message.answer("Название повода слишком длинное. Пожалуйста, уложитесь в 50 символов.")
+                return
             st["occasion"] = f"✏️ {text_input}"
             set_user_state(chat_id, st)
             await message.answer("Отлично! Теперь выберите стиль:", reply_markup=build_style_keyboard())
@@ -343,12 +407,16 @@ def register_handlers(dp: Dispatcher, bot: Bot):
 
         # 3. Waiting for addressee name (both AI and custom modes go through here first)
         if st.get("addressee") is None:
+            if len(text_input) > 50:
+                await message.answer("Имя адресата слишком длинное. Пожалуйста, напишите короче.")
+                return
+                
             st["addressee"] = text_input
             set_user_state(chat_id, st)
 
             if st["text_mode"] == "custom":
                 # Custom mode: after name, ask for the greeting text
-                await message.answer("Напишите свой текст поздравления (2-3 короткие фразы):")
+                await message.answer(f"Напишите свой текст поздравления (максимум {MAX_CUSTOM_TEXT_LENGTH} символов):")
             else:
                 # AI mode: name captured, generate now
                 payload = {
@@ -372,26 +440,31 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                     )
             return
 
-        # 4. Custom mode only: greeting text received -> generate postcard
+        # 4. Custom mode only: greeting text received -> check length -> generate postcard
+        if len(text_input) > MAX_CUSTOM_TEXT_LENGTH:
+            await message.answer(
+                f"Текст слишком длинный ({len(text_input)} символов). "
+                f"Пожалуйста, уложитесь в {MAX_CUSTOM_TEXT_LENGTH} символов, чтобы он красиво смотрелся на открытке."
+            )
+            return
+
         payload = {
             "occasion": st["occasion"],
             "style": st["style"],
             "font": st["font"],
-            "text_mode": "custom",
-            "text_input": text_input,        # full greeting goes to caption
-            "addressee": st["addressee"],   # name goes on image
+            "text_mode": st["text_mode"],
+            "text_input": text_input,   # used for both AI hint or full custom text
         }
-
+        
         set_user_state(chat_id, DEFAULT_STATE.copy())
 
         credits = get_credits(chat_id)
         if credits > 0:
-            await generate_postcard(chat_id, message, payload)
-            return
-
-        save_pending(chat_id, payload)
-        await message.answer(
-            "У вас закончились бесплатные открытки.\n"
-            "Выберите пакет для продолжения или пригласите друга через /referral:",
-            reply_markup=build_packages_keyboard()
-        )
+            await generate_postcard(chat_id, message, payload, bot)
+        else:
+            save_pending(chat_id, payload)
+            await message.answer(
+                "У вас закончились бесплатные открытки.\n"
+                "Выберите пакет для продолжения или пригласите друга через /referral:",
+                reply_markup=build_packages_keyboard()
+            )
