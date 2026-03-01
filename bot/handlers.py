@@ -351,7 +351,7 @@ def register_handlers(dp: Dispatcher, bot: Bot):
 
         pending = pop_pending(chat_id)
         if pending:
-            await generate_postcard(chat_id, message, pending)
+            await generate_postcard(chat_id, message, pending, bot)
         else:
             await message.answer("Выберите повод для новой открытки:", reply_markup=build_occasion_keyboard())
 
@@ -405,7 +405,7 @@ def register_handlers(dp: Dispatcher, bot: Bot):
 
         credits = get_credits(chat_id)
         if credits > 0:
-            await generate_postcard(chat_id, message, payload)
+            await generate_postcard(chat_id, message, payload, bot)
         else:
             save_pending(chat_id, payload)
             await message.answer(
