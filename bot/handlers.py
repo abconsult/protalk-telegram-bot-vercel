@@ -251,7 +251,9 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                 caption="Отлично! Теперь выберите шрифт для надписи:",
                 reply_markup=build_font_keyboard()
             )
-        except FileNotFoundError:
+        except Exception as e:
+            # Silently fallback to text if image is missing or cannot be sent
+            logger.warning(f"Failed to send font preview: {e}")
             await message.answer("Отлично! Теперь выберите шрифт для надписи:", reply_markup=build_font_keyboard())
 
     @dp.message(F.text.in_(FONTS_LIST))
