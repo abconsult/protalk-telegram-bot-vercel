@@ -251,9 +251,20 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             set_user_state(chat_id, st)
             logger.info("===> state saved successfully")
 
-            logger.info("===> sending keyboard")
-            await message.answer("Отлично! Теперь выберите шрифт для надписи:", reply_markup=build_font_keyboard())
-            logger.info("===> keyboard sent")
+            # Try to send the font preview image, fallback to text if missing
+            preview_path = os.path.join(os.path.dirname(__file__), "..", "fonts", "fonts_preview.jpg")
+            try:
+                with open(preview_path, "rb") as f:
+                    preview_bytes = f.read()
+                await message.answer_photo(
+                    photo=BufferedInputFile(preview_bytes, filename="fonts_preview.jpg"),
+                    caption="Отлично! Теперь выберите шрифт для надписи:",
+                    reply_markup=build_font_keyboard()
+                )
+                logger.info("===> sent font preview image successfully")
+            except Exception as e:
+                logger.warning(f"Failed to read/send font preview image, sending text fallback: {e}")
+                await message.answer("Отлично! Теперь выберите шрифт для надписи:", reply_markup=build_font_keyboard())
             
         except Exception as e:
             logger.error(f"CRITICAL ERROR in choose_style: {e}")
