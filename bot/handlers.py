@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import traceback
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile, InlineQueryResultCachedPhoto
@@ -231,20 +232,36 @@ def register_handlers(dp: Dispatcher, bot: Bot):
 
     @dp.message(F.text.in_(STYLES))
     async def choose_style(message: types.Message):
-        chat_id = message.chat.id
-        st = get_user_state(chat_id)
-        
-        if not st.get("occasion") or st.get("occasion") == "WAITING_CUSTOM_OCCASION":
-            await message.answer("Сначала выберите повод:", reply_markup=build_occasion_keyboard())
-            return
+        try:
+            logger.info(f"===> user selected style: {message.text}")
+            chat_id = message.chat.id
+            st = get_user_state(chat_id)
+            logger.info(f"===> current state: {st}")
             
-        st["style"] = message.text
-        st["font"] = None
-        st["text_mode"] = None
-        set_user_state(chat_id, st)
+            if not st.get("occasion") or st.get("occasion") == "WAITING_CUSTOM_OCCASION":
+                logger.info("===> returning to choose occasion")
+                await message.answer("Сначала выберите повод:", reply_markup=build_occasion_keyboard())
+                return
+                
+            st["style"] = message.text
+            st["font"] = None
+            st["text_mode"] = None
+            
+            logger.info(f"===> saving state: {st}")
+            set_user_state(chat_id, st)
+            logger.info("===> state saved successfully")
 
-        # Removed local file read completely to avoid Vercel hanging
-        await message.answer("Отлично! Теперь выберите шрифт для надписи:", reply_markup=build_font_keyboard())
+            logger.info("===> sending keyboard")
+            await message.answer("Отлично! Теперь выберите шрифт для надписи:", reply_markup=build_font_keyboard())
+            logger.info("===> keyboard sent")
+            
+        except Exception as e:
+            logger.error(f"CRITICAL ERROR in choose_style: {e}")
+            logger.error(traceback.format_exc())
+            try:
+                await message.answer(f"Произошла системная ошибка: {str(e)[:50]}. Напишите /start.")
+            except:
+                pass
 
     @dp.message(F.text.in_(FONTS_LIST))
     async def choose_font(message: types.Message):
