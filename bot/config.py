@@ -12,7 +12,7 @@ FREE_CREDITS = 3
 MAX_CUSTOM_TEXT_LENGTH = 300  # Maximum characters allowed for custom greeting text
 
 PACKAGES = {
-    3:  {"rub": 90, "amount": 9000, "label": "Пакет: 3 открытки"},
+    3:  {"rub": 90,  "amount": 9000,  "label": "Пакет: 3 открытки"},
     5:  {"rub": 150, "amount": 15000, "label": "Пакет: 5 открыток"},
     10: {"rub": 300, "amount": 30000, "label": "Пакет: 10 открыток"},
 }
@@ -43,19 +43,19 @@ FONTS_LIST = [
 ]
 
 FONTS_FILES = {
-    "Lobster": "fonts/Lobster-Regular.ttf",
-    "Caveat": "fonts/Caveat-Regular.ttf",
-    "Pacifico": "fonts/Pacifico-Regular.ttf",
-    "Comfortaa": "fonts/Comfortaa-Regular.ttf",
+    "Lobster":    "fonts/Lobster-Regular.ttf",
+    "Caveat":     "fonts/Caveat-Regular.ttf",
+    "Pacifico":   "fonts/Pacifico-Regular.ttf",
+    "Comfortaa":  "fonts/Comfortaa-Regular.ttf",
 }
 
 # Map EXACTLY the strings from OCCASIONS list (with emojis) to the prompt themes
 OCCASION_TEXT_MAP = {
     "🎂 День рождения": "день рождения",
-    "💍 Свадьба": "свадьбу",
-    "👶 Рождение ребёнка": "рождение ребёнка",
-    "🌸 8 марта": "8 марта",
-    "🎓 Завершение учёбы": "завершение учёбы",
+    "💍 Свадьба":            "свадьбу",
+    "👶 Рождение ребёнка":  "рождение ребёнка",
+    "🌸 8 марта":             "8 марта",
+    "🎓 Завершение учёбы":  "завершение учёбы",
 }
 
 STYLE_PROMPT_MAP = {
@@ -77,7 +77,7 @@ STYLE_PROMPT_MAP = {
         "Киберпанк неоновый фон. Тематика: подарки на {occasion}. "
         "По краям холста тематические элементы, символизирующие {occasion}. "
         "Светящиеся элементы по контуру фигурок на тёмном фоне. "
-        "В центре - абсолютно темная пустая зона без элементов. "
+        "В центре - абсолютно тёмная пустая зона без элементов. "
         "Никаких неоновых вывесок, никаких букв и символов. Neon background, blank dark center, no text."
     ),
     "Пастель": (
@@ -101,3 +101,38 @@ STYLE_PROMPT_MAP = {
         "Строго без текста, чистый фон. Minimalist background, lots of negative space, no text."
     ),
 }
+
+# ---------------------------------------------------------------------------
+# Template postcards — 3 permanent cards always available in inline mode.
+#
+# Формат caption: начинается со строчной буквы, без имени — inline-обработчик
+# подставляет имя адресата перед ним:
+#   если есть имя  →  "Маша, {caption}"
+#   если нет имени →  "..., {caption}"
+# ---------------------------------------------------------------------------
+TEMPLATE_POSTCARDS = [
+    {
+        "id":         "birthday",
+        "title":      "🎂 День Рождения",
+        "image_file": "assets/templates/birthday.jpg",
+        "image_text": "С Днём Рождения!",
+        "caption":    "поздравляю с Днём Рождения! "
+                      "Желаю здоровья, счастья и исполнения всех желаний! 🎂",
+    },
+    {
+        "id":         "march8",
+        "title":      "🌸 8 Марта",
+        "image_file": "assets/templates/march8.jpg",
+        "image_text": "С 8 Марта!",
+        "caption":    "поздравляю с прекрасным весенним праздником! "
+                      "Желаю красоты, тепла и женского счастья! 🌸",
+    },
+    {
+        "id":         "universal",
+        "title":      "🎉 Поздравляю",
+        "image_file": "assets/templates/universal.jpg",
+        "image_text": "Поздравляю!",
+        "caption":    "поздравляю! "
+                      "Пусть каждый день приносит радость и улыбки! 🎉",
+    },
+]
