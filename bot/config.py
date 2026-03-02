@@ -121,7 +121,7 @@ TEMPLATE_POSTCARDS = [
         "id":      "march8-1",
         "title":   "🌸 8 Марта",
         # ↓↓↓ вставьте реальный Telegram file_id вместо пустой строки
-        "file_id": "AgACAgIAAxkBAAEbpi1ppVWfr2XkVKW2i5r2ds-avJDacgACchZrG3LgMUn5Hg7mjDXZmgEAAwIAA3kAAzoE",
+        "file_id": "AgACAgIAAxkBAAEbpnFppV5mWs17NZ2rGUBJ2pbn599P0wAC1RRrG4CCMUkQdC8PG-lu0QEAAwIAA3gAAzoE",
         "caption": "поздравляю с 8 марта! "
                    "Желаю здоровья, счастья и исполнения всех желаний! 🎂",
     },
@@ -129,7 +129,7 @@ TEMPLATE_POSTCARDS = [
         "id":      "march8-2",
         "title":   "🌸 8 Марта",
         # ↓↓↓ вставьте реальный Telegram file_id вместо пустой строки
-        "file_id": "AgACAgIAAxkBAAEbpitppVUFkJgucd1FwERUrPOx47nJCAAC4xVrG7uiKEn0TppMJBbOkQEAAwIAA3gAAzoE",
+        "file_id": "AgACAgIAAxkBAAEbpnVppV6jBRx5AXY4xIjYsP_d-FXUuwACdhVrG4CCMUmbjUVYL0djDQEAAwIAA20AAzoE",
         "caption": "поздравляю с прекрасным весенним праздником! "
                    "Желаю красоты, тепла и женского счастья! 🌸",
     },
@@ -137,7 +137,7 @@ TEMPLATE_POSTCARDS = [
         "id":      "march8-3",
         "title":   "🌸 8 Марта",
         # ↓↓↓ вставьте реальный Telegram file_id вместо пустой строки
-        "file_id": "AgACAgIAAxkBAAEbpjFppVYoHG-jczPagQswVVzkqxqjpAACdRZrG3LgMUkk8BGLB8x8UwEAAwIAA3kAAzoE",
+        "file_id": "AgACAgIAAxkBAAEbpndppV7QJdgEn1WIy5Gq1CqpsUK0ugACeBVrG4CCMUmsC5oRdnAPXwEAAwIAA3gAAzoE",
         "caption": "поздравляю с праздником Весны! "
                    "Пусть каждый день приносит радость и улыбки! 🎉",
     },
