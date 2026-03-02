@@ -106,6 +106,8 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         name = inline_query.query.strip()
         user_id = inline_query.from_user.id
 
+        logger.info(f"INLINE QUERY: user_id={user_id}, query='{name}'")
+
         # 1) Template postcards from config (with hardcoded file_id)
         results = []
         for idx, tmpl in enumerate(TEMPLATE_POSTCARDS):
@@ -114,9 +116,7 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                 # Skip not-yet-configured templates (no file_id provided)
                 continue
 
-            base_caption = tmpl.get("caption", "")
-            # Ensure base_caption is safe to index
-            base_caption = base_caption.strip()
+            base_caption = tmpl.get("caption", "").strip()
 
             if name:
                 final_caption = f"{name}, {base_caption}"
@@ -138,7 +138,6 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             caption_text = (pc.get("caption") or "").strip()
 
             if name:
-                # "Маша, поздравляю с ..."
                 final_caption = f"{name}, {caption_text}"
             else:
                 final_caption = f"..., {caption_text}"
@@ -150,6 +149,8 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                     caption=final_caption,
                 )
             )
+
+        logger.info(f"INLINE RESULTS: {len(results)} items (templates+user)")
 
         # If nothing to show yet (no templates configured and no postcards) —
         # invite user to create a card via private chat.
