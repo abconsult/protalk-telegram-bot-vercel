@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-import traceback
+import traceback as tb
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile, InlineQueryResultCachedPhoto
@@ -11,7 +11,7 @@ from bot.config import ADMIN_ID, OCCASIONS, STYLES, FONTS_LIST, PACKAGES, YUKASS
 from bot.database import (
     kv, credits_key, get_credits, set_user_state, get_user_state,
     add_credits, pending_key, pop_pending, save_pending,
-    record_new_user, get_total_users, get_total_generations, 
+    record_new_user, get_total_users, get_total_generations,
     get_total_revenue, record_payment, get_all_users, is_user_exists,
     get_postcards
 )
@@ -27,22 +27,20 @@ logger = logging.getLogger(__name__)
 REFERRAL_BONUS_INVITER = 2
 REFERRAL_BONUS_INVITEE = 1
 
-# State tracking (addressee is no longer needed)
 DEFAULT_STATE = {"occasion": None, "style": None, "font": None, "text_mode": None}
 
+
 def register_handlers(dp: Dispatcher, bot: Bot):
-    
+
     # ---------------- ADMIN PANEL ----------------
 
     @dp.message(Command("stats"))
     async def admin_stats(message: types.Message):
         if message.chat.id != ADMIN_ID:
             return
-            
         users = get_total_users()
         generations = get_total_generations()
         revenue = get_total_revenue()
-        
         text = (
             f"📊 <b>Статистика проекта:</b>\n\n"
             f"👥 Всего пользователей: <b>{users}</b>\n"
@@ -55,19 +53,15 @@ def register_handlers(dp: Dispatcher, bot: Bot):
     async def admin_broadcast(message: types.Message):
         if message.chat.id != ADMIN_ID:
             return
-            
         text_to_send = message.text.replace("/broadcast", "").strip()
         if not text_to_send:
             await message.answer("Использование: `/broadcast Ваш текст для рассылки`", parse_mode="Markdown")
             return
-            
         users = get_all_users()
         if not users:
             await message.answer("В базе нет пользователей для рассылки.")
             return
-
         await message.answer(f"⏳ Начинаю рассылку для {len(users)} пользователей...")
-        
         success, failed = 0, 0
         for uid in users:
             try:
@@ -77,8 +71,10 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             except Exception as e:
                 failed += 1
                 logger.warning(f"Failed to send broadcast to {uid}: {e}")
-                
-        await message.answer(f"✅ <b>Рассылка завершена!</b>\n\nУспешно: {success}\nОшибок (заблокировали бота): {failed}", parse_mode="HTML")
+        await message.answer(
+            f"✅ <b>Рассылка завершена!</b>\n\nУспешно: {success}\nОшибок: {failed}",
+            parse_mode="HTML"
+        )
 
     @dp.message(Command("reset"))
     async def reset_credits(message: types.Message):
@@ -94,116 +90,112 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         await message.answer("🧹 Состояние очищено. Начните заново с /start")
 
     # ---------------- INLINE MODE ----------------
-    
+
     @dp.inline_query()
     async def inline_query_handler(inline_query: types.InlineQuery):
-        """Show 3 template cards (from config) + user's saved postcards.
+        """Show template cards (from config) + user's saved postcards."""
+        try:
+            name = inline_query.query.strip()
+            user_id = inline_query.from_user.id
+            logger.info(f"INLINE QUERY: user_id={user_id}, query='{name}'")
 
-        Usage pattern:
-            @Pozdravish_bot Маша
-        where "Маша" — имя адресата, которое мы подставляем в caption.
-        """
-        name = inline_query.query.strip()
-        user_id = inline_query.from_user.id
-
-        logger.info(f"INLINE QUERY: user_id={user_id}, query='{name}'")
-
-        # 1) Template postcards from config (with hardcoded file_id)
-        results = []
-        for idx, tmpl in enumerate(TEMPLATE_POSTCARDS):
-            file_id = tmpl.get("file_id") or ""
-            if not file_id:
-                # Skip not-yet-configured templates (no file_id provided)
-                continue
-
-            base_caption = tmpl.get("caption", "").strip()
-
-            if name:
-                final_caption = f"{name}, {base_caption}"
-            else:
-                final_caption = f"..., {base_caption}"
-
-            results.append(
-                InlineQueryResultCachedPhoto(
-                    id=f"tmpl-{idx}",
-                    photo_file_id=file_id,
-                    title=tmpl.get("title"),
-                    caption=final_caption,
+            # 1) Template postcards
+            results = []
+            logger.info(f"INLINE: TEMPLATE_POSTCARDS count={len(TEMPLATE_POSTCARDS)}")
+            for idx, tmpl in enumerate(TEMPLATE_POSTCARDS):
+                file_id = tmpl.get("file_id") or ""
+                logger.info(f"INLINE: tmpl[{idx}] id={tmpl.get('id')} file_id_len={len(file_id)}")
+                if not file_id:
+                    continue
+                base_caption = (tmpl.get("caption") or "").strip()
+                final_caption = f"{name}, {base_caption}" if name else f"..., {base_caption}"
+                results.append(
+                    InlineQueryResultCachedPhoto(
+                        id=f"tmpl-{idx}",
+                        photo_file_id=file_id,
+                        caption=final_caption,
+                    )
                 )
-            )
+                logger.info(f"INLINE: added tmpl-{idx} ok")
 
-        # 2) User's saved postcards (personal gallery)
-        postcards = get_postcards(user_id)
-        for idx, pc in enumerate(postcards):
-            caption_text = (pc.get("caption") or "").strip()
-
-            if name:
-                final_caption = f"{name}, {caption_text}"
-            else:
-                final_caption = f"..., {caption_text}"
-
-            results.append(
-                InlineQueryResultCachedPhoto(
-                    id=f"user-{idx}",
-                    photo_file_id=pc["file_id"],
-                    caption=final_caption,
+            # 2) User's saved postcards
+            logger.info(f"INLINE: fetching postcards for user_id={user_id}")
+            postcards = get_postcards(user_id)
+            logger.info(f"INLINE: postcards count={len(postcards)}")
+            for idx, pc in enumerate(postcards):
+                caption_text = (pc.get("caption") or "").strip()
+                final_caption = f"{name}, {caption_text}" if name else f"..., {caption_text}"
+                results.append(
+                    InlineQueryResultCachedPhoto(
+                        id=f"user-{idx}",
+                        photo_file_id=pc["file_id"],
+                        caption=final_caption,
+                    )
                 )
-            )
 
-        logger.info(f"INLINE RESULTS: {len(results)} items (templates+user)")
+            logger.info(f"INLINE RESULTS: {len(results)} items total")
 
-        # If nothing to show yet (no templates configured and no postcards) —
-        # invite user to create a card via private chat.
-        if not results:
+            if not results:
+                await inline_query.answer(
+                    results=[],
+                    cache_time=1,
+                    is_personal=True,
+                    switch_pm_text="✨ Создать открытку",
+                    switch_pm_parameter="create",
+                )
+                return
+
             await inline_query.answer(
-                results=[],
+                results,
                 cache_time=1,
                 is_personal=True,
-                switch_pm_text="✨ Создать открытку",
+                switch_pm_text="➕ Создать ещё",
                 switch_pm_parameter="create",
             )
-            return
+            logger.info("INLINE: answer sent successfully")
 
-        await inline_query.answer(
-            results,
-            cache_time=1,
-            is_personal=True,
-            switch_pm_text="➕ Создать ещё",
-            switch_pm_parameter="create",
-        )
-
+        except Exception:
+            logger.info(f"INLINE ERROR:\n{tb.format_exc()}")
+            try:
+                await inline_query.answer(
+                    results=[],
+                    cache_time=1,
+                    is_personal=True,
+                    switch_pm_text="✨ Создать открытку",
+                    switch_pm_parameter="create",
+                )
+            except Exception:
+                pass
 
     # ---------------- USER FLOW ----------------
 
     @dp.message(CommandStart())
     async def start(message: types.Message):
         chat_id = message.chat.id
-        
         args = message.text.split()
         referral_text = ""
-        
         if not is_user_exists(chat_id):
             record_new_user(chat_id)
-            
             if len(args) > 1 and args[1].isdigit():
                 inviter_id = int(args[1])
                 if inviter_id != chat_id:
                     add_credits(chat_id, REFERRAL_BONUS_INVITEE)
-                    referral_text = f"🎉 <b>Вы перешли по приглашению!</b>\nВам начислен дополнительный <b>+{REFERRAL_BONUS_INVITEE} кредит</b>.\n\n"
-                    
+                    referral_text = (
+                        f"🎉 <b>Вы перешли по приглашению!</b>\n"
+                        f"Вам начислен дополнительный <b>+{REFERRAL_BONUS_INVITEE} кредит</b>.\n\n"
+                    )
                     try:
                         add_credits(inviter_id, REFERRAL_BONUS_INVITER)
                         await bot.send_message(
-                            inviter_id, 
-                            f"🎁 <b>По вашей ссылке зарегистрировался друг!</b>\nВам начислено <b>+{REFERRAL_BONUS_INVITER} кредита</b>.", 
-                            parse_mode="HTML"
+                            inviter_id,
+                            f"🎁 <b>По вашей ссылке зарегистрировался друг!</b>\n"
+                            f"Вам начислено <b>+{REFERRAL_BONUS_INVITER} кредита</b>.",
+                            parse_mode="HTML",
                         )
                     except Exception as e:
                         logger.error(f"Failed to notify inviter {inviter_id}: {e}")
-        
         set_user_state(chat_id, DEFAULT_STATE.copy())
         credits = get_credits(chat_id)
-        
         welcome_text = (
             f"Привет! Я делаю поздравления с ИИ 😃🙌🏼\n\n"
             f"{referral_text}"
@@ -216,7 +208,6 @@ def register_handlers(dp: Dispatcher, bot: Bot):
     async def get_referral_link(message: types.Message):
         chat_id = message.chat.id
         link = await create_start_link(bot, str(chat_id), encode=False)
-        
         text = (
             f"🤝 <b>Приглашайте друзей и получайте бесплатные открытки!</b>\n\n"
             f"За каждого нового друга, который запустит бота по вашей ссылке, "
@@ -233,30 +224,21 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         await message.answer(
             f"Осталось кредитов: <b>{credits}</b>\n\n"
             f"💡 Получить бесплатные кредиты можно пригласив друзей через команду /referral",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
 
     @dp.message(F.text.in_(OCCASIONS))
     async def choose_occasion(message: types.Message):
         chat_id = message.chat.id
-        
         if message.text == "✏️ Свой повод":
-            st = {
-                "occasion": "WAITING_CUSTOM_OCCASION",
-                "style": None,
-                "font": None,
-                "text_mode": None,
-            }
+            st = {"occasion": "WAITING_CUSTOM_OCCASION", "style": None, "font": None, "text_mode": None}
             set_user_state(chat_id, st)
-            await message.answer("Пожалуйста, напишите свой повод (например: День программиста, Годовщина знакомства):", reply_markup=types.ReplyKeyboardRemove())
+            await message.answer(
+                "Пожалуйста, напишите свой повод (например: День программиста):",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
             return
-
-        st = {
-            "occasion": message.text,
-            "style": None,
-            "font": None,
-            "text_mode": None,
-        }
+        st = {"occasion": message.text, "style": None, "font": None, "text_mode": None}
         set_user_state(chat_id, st)
         await message.answer("Теперь выберите стиль:", reply_markup=build_style_keyboard())
 
@@ -267,20 +249,13 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             chat_id = message.chat.id
             st = get_user_state(chat_id)
             logger.info(f"===> current state: {st}")
-            
             if not st.get("occasion") or st.get("occasion") == "WAITING_CUSTOM_OCCASION":
-                logger.info("===> returning to choose occasion")
                 await message.answer("Сначала выберите повод:", reply_markup=build_occasion_keyboard())
                 return
-                
             st["style"] = message.text
             st["font"] = None
             st["text_mode"] = None
-            
-            logger.info(f"===> saving state: {st}")
             set_user_state(chat_id, st)
-            logger.info("===> state saved successfully")
-
             preview_path = os.path.join(os.path.dirname(__file__), "..", "fonts", "fonts_preview.jpg")
             try:
                 with open(preview_path, "rb") as f:
@@ -290,56 +265,47 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                     caption="Отлично! Теперь выберите шрифт для надписи:",
                     reply_markup=build_font_keyboard()
                 )
-                logger.info("===> sent font preview image successfully")
             except Exception as e:
-                logger.warning(f"Failed to read/send font preview image, sending text fallback: {e}")
+                logger.warning(f"Failed to send font preview image: {e}")
                 await message.answer("Отлично! Теперь выберите шрифт для надписи:", reply_markup=build_font_keyboard())
-            
         except Exception as e:
             logger.error(f"CRITICAL ERROR in choose_style: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(tb.format_exc())
             try:
-                await message.answer(f"Произошла системная ошибка: {str(e)[:50]}. Напишите /start.")
-            except:
+                await message.answer(f"Произошла ошибка: {str(e)[:50]}. Напишите /start.")
+            except Exception:
                 pass
 
     @dp.message(F.text.in_(FONTS_LIST))
     async def choose_font(message: types.Message):
         chat_id = message.chat.id
         st = get_user_state(chat_id)
-
         if not st.get("style"):
             await message.answer("Сначала выберите стиль:", reply_markup=build_style_keyboard())
             return
-
         st["font"] = message.text
         st["text_mode"] = None
         set_user_state(chat_id, st)
-        
         await message.answer("Как напишем поздравление?", reply_markup=build_text_mode_keyboard())
 
     @dp.message(F.text.in_(["✨ Сгенерировать ИИ", "✏️ Написать свой текст"]))
     async def choose_text_mode(message: types.Message):
         chat_id = message.chat.id
         st = get_user_state(chat_id)
-
         if not st.get("font"):
             await message.answer("Сначала выберите шрифт:", reply_markup=build_font_keyboard())
             return
-
         mode = "ai" if message.text == "✨ Сгенерировать ИИ" else "custom"
         st["text_mode"] = mode
         set_user_state(chat_id, st)
-
         if mode == "ai":
-            prompt = "Напишите коротко, для кого это поздравление и какие есть пожелания (например: для мамы от сына, крепкого здоровья и счастья):"
+            prompt = "Напишите коротко, для кого это поздравление и какие есть пожелания:"
         else:
             prompt = (
                 "Напишите свой текст поздравления.\n"
-                "❗️ <b>ВАЖНО:</b> Не пишите имя адресата в начале. Начните сразу с сути (желательно с маленькой буквы).\n"
+                "❗️ <b>ВАЖНО:</b> Не пишите имя адресата в начале.\n"
                 "Имя будет подставлено автоматически при отправке открытки."
             )
-        
         await message.answer(prompt, reply_markup=types.ReplyKeyboardRemove(), parse_mode="HTML")
 
     @dp.callback_query(F.data.startswith("buy:"))
@@ -347,21 +313,16 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         chat_id = query.message.chat.id
         _, n_str = query.data.split(":")
         n = int(n_str)
-
         if n not in PACKAGES:
             await query.answer("Неверный пакет", show_alert=True)
             return
-
         pending = kv.get(pending_key(chat_id))
         if not pending:
             await query.answer("Нет активного запроса. Начните с /start", show_alert=True)
             return
-
         pkg = PACKAGES[n]
         payload = f"pkg:{n}:{chat_id}"
-
         await query.answer()
-
         await bot.send_invoice(
             chat_id=chat_id,
             title=pkg["label"],
@@ -380,7 +341,6 @@ def register_handlers(dp: Dispatcher, bot: Bot):
     async def paid(message: types.Message):
         chat_id = message.chat.id
         invoice_payload = message.successful_payment.invoice_payload
-
         try:
             prefix, n_str, _ = invoice_payload.split(":")
             if prefix != "pkg":
@@ -391,12 +351,9 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         except Exception:
             await message.answer("Оплата прошла, но пакет не распознан. Напишите /start.")
             return
-
         record_payment(PACKAGES[n]["rub"])
-
         new_credits = add_credits(chat_id, n)
         await message.answer(f"✅ Оплата успешна! Начислено {n} кредитов. Теперь доступно: {new_credits}")
-
         pending = pop_pending(chat_id)
         if pending:
             await generate_postcard(chat_id, message, pending, bot)
@@ -407,45 +364,33 @@ def register_handlers(dp: Dispatcher, bot: Bot):
     async def text_input_and_route(message: types.Message):
         chat_id = message.chat.id
         st = get_user_state(chat_id)
-        
-        # Guard: message.text is None for stickers, photos, voice, etc.
         text_input = (message.text or "").strip()
         if not text_input:
             await message.answer("Пожалуйста, отправьте текст.")
             return
-            
         if len(text_input) > 500:
-            await message.answer("Текст слишком длинный. Пожалуйста, сделайте его короче (максимум 500 символов).")
+            await message.answer("Текст слишком длинный (макс. 500 символов).")
             return
-            
-        # 1. Waiting for custom occasion text
         if st.get("occasion") == "WAITING_CUSTOM_OCCASION":
             if len(text_input) > 50:
-                await message.answer("Название повода слишком длинное. Пожалуйста, уложитесь в 50 символов.")
+                await message.answer("Название повода слишком длинное (макс. 50 символов).")
                 return
             st["occasion"] = f"✏️ {text_input}"
             set_user_state(chat_id, st)
             await message.answer("Отлично! Теперь выберите стиль:", reply_markup=build_style_keyboard())
             return
-
-        # 2. Check if we are missing required state
         if not st.get("occasion") or not st.get("style") or not st.get("font") or not st.get("text_mode"):
             await message.answer("Давайте начнём заново: выберите повод.", reply_markup=build_occasion_keyboard())
             return
-
-        # 3. Waiting for addressee name (both AI and custom modes go through here first)
         if st.get("addressee") is None:
             if len(text_input) > 50:
-                await message.answer("Имя адресата слишком длинное. Пожалуйста, напишите короче.")
+                await message.answer("Имя адресата слишком длинное (макс. 50 символов).")
                 return
-                
             st["addressee"] = text_input
             set_user_state(chat_id, st)
-
             if st["text_mode"] == "custom":
-                await message.answer(f"Напишите свой текст поздравления (максимум {MAX_CUSTOM_TEXT_LENGTH} символов):")
+                await message.answer(f"Напишите свой текст поздравления (макс. {MAX_CUSTOM_TEXT_LENGTH} символов):")
             else:
-                # AI mode: name captured, generate now
                 payload = {
                     "occasion": st["occasion"],
                     "style": st["style"],
@@ -457,7 +402,6 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                 set_user_state(chat_id, DEFAULT_STATE.copy())
                 credits = get_credits(chat_id)
                 if credits > 0:
-                    # FIX: was missing `bot` argument — caused TypeError → 'not handled' in logs
                     await generate_postcard(chat_id, message, payload, bot)
                 else:
                     save_pending(chat_id, payload)
@@ -467,15 +411,12 @@ def register_handlers(dp: Dispatcher, bot: Bot):
                         reply_markup=build_packages_keyboard()
                     )
             return
-
-        # 4. Custom mode only: greeting text received -> check length -> generate postcard
         if len(text_input) > MAX_CUSTOM_TEXT_LENGTH:
             await message.answer(
                 f"Текст слишком длинный ({len(text_input)} символов). "
-                f"Пожалуйста, уложитесь в {MAX_CUSTOM_TEXT_LENGTH} символов, чтобы он красиво смотрелся на открытке."
+                f"Пожалуйста, уложитесь в {MAX_CUSTOM_TEXT_LENGTH} символов."
             )
             return
-
         payload = {
             "occasion": st["occasion"],
             "style": st["style"],
@@ -483,9 +424,7 @@ def register_handlers(dp: Dispatcher, bot: Bot):
             "text_mode": st["text_mode"],
             "text_input": text_input,
         }
-        
         set_user_state(chat_id, DEFAULT_STATE.copy())
-
         credits = get_credits(chat_id)
         if credits > 0:
             await generate_postcard(chat_id, message, payload, bot)
