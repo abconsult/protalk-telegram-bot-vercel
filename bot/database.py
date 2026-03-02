@@ -7,6 +7,11 @@ from bot.config import FREE_CREDITS
 # UPSTASH_REDIS_REST_TOKEN
 kv = Redis.from_env()
 
+
+# ---------------------------------------------------------------------------
+# Key helpers
+# ---------------------------------------------------------------------------
+
 def credits_key(user_id: int) -> str:
     return f"user:{user_id}:credits"
 
@@ -19,6 +24,14 @@ def pending_key(user_id: int) -> str:
 def postcards_key(user_id: int) -> str:
     return f"user:{user_id}:postcards"
 
+def template_file_id_key(template_id: str) -> str:
+    """Global Redis key for a template's Telegram file_id."""
+    return f"template:file_id:{template_id}"
+
+
+# ---------------------------------------------------------------------------
+# Credits
+# ---------------------------------------------------------------------------
 
 def get_credits(user_id: int) -> int:
     val = kv.get(credits_key(user_id))
@@ -33,8 +46,12 @@ def add_credits(user_id: int, amount: int) -> int:
     kv.set(credits_key(user_id), new_val)
     return new_val
 
+
+# ---------------------------------------------------------------------------
+# User state (FSM stored in Redis — survives Vercel cold starts)
+# ---------------------------------------------------------------------------
+
 def set_user_state(user_id: int, state: dict):
-    # Ensure we store it as a JSON string so retrieval is consistent
     kv.set(state_key(user_id), json.dumps(state))
 
 def get_user_state(user_id: int) -> dict:
@@ -50,6 +67,11 @@ def get_user_state(user_id: int) -> dict:
         return val
     return {}
 
+
+# ---------------------------------------------------------------------------
+# Pending generation (saved when user runs out of credits mid-flow)
+# ---------------------------------------------------------------------------
+
 def save_pending(user_id: int, payload: dict):
     kv.set(pending_key(user_id), json.dumps(payload))
 
@@ -60,13 +82,16 @@ def pop_pending(user_id: int) -> dict:
         if isinstance(val, str):
             try:
                 return json.loads(val)
-            except:
+            except Exception:
                 pass
         if isinstance(val, dict):
             return val
     return None
 
-# ---- Statistics & Analytics ----
+
+# ---------------------------------------------------------------------------
+# Statistics & Analytics
+# ---------------------------------------------------------------------------
 
 def record_new_user(user_id: int):
     kv.sadd("stats:users", user_id)
@@ -95,13 +120,16 @@ def get_total_revenue() -> int:
     val = kv.get("stats:revenue")
     return int(val) if val else 0
 
-# ---- Inline Mode Postcards ----
+
+# ---------------------------------------------------------------------------
+# User inline-mode postcards (personal gallery, max 5)
+# ---------------------------------------------------------------------------
 
 def save_postcard(user_id: int, file_id: str, caption: str):
-    """Saves a generated postcard to the user's personal gallery (max 5)"""
+    """Saves a generated postcard to the user's personal gallery (max 5)."""
     key = postcards_key(user_id)
     existing = kv.get(key)
-    
+
     if existing:
         if isinstance(existing, str):
             try:
@@ -112,14 +140,14 @@ def save_postcard(user_id: int, file_id: str, caption: str):
             cards = existing
     else:
         cards = []
-        
+
     cards.insert(0, {"file_id": file_id, "caption": caption})
-    cards = cards[:5]  # Keep only the last 5
-    
+    cards = cards[:5]  # Keep only the most recent 5
+
     kv.set(key, json.dumps(cards))
 
 def get_postcards(user_id: int) -> list:
-    """Returns the user's saved postcards"""
+    """Returns the user's saved postcards (newest first, max 5)."""
     key = postcards_key(user_id)
     val = kv.get(key)
     if val:
@@ -130,3 +158,52 @@ def get_postcards(user_id: int) -> list:
                 return []
         return val
     return []
+
+
+# ---------------------------------------------------------------------------
+# Template postcards — global, not per-user
+#
+# Telegram file_ids for the 3 permanent template images are stored once
+# (via /upload_templates admin command) and reused indefinitely.
+# Key format:  template:file_id:{template_id}
+#              e.g.  template:file_id:birthday
+# ---------------------------------------------------------------------------
+
+def set_template_file_id(template_id: str, file_id: str) -> None:
+    """Persist a Telegram file_id for a template image.
+
+    Called once by the /upload_templates admin command after the image
+    is uploaded to Telegram.  The file_id is stable and never expires.
+    """
+    kv.set(template_file_id_key(template_id), file_id)
+
+
+def get_template_file_id(template_id: str) -> str | None:
+    """Return the stored Telegram file_id for a template, or None if not uploaded yet."""
+    val = kv.get(template_file_id_key(template_id))
+    # Upstash may return bytes or str depending on client version
+    if isinstance(val, bytes):
+        return val.decode()
+    return val  # str or None
+
+
+def get_all_template_file_ids() -> dict[str, str | None]:
+    """Return a mapping of template_id → file_id for all templates.
+
+    Useful for the /upload_templates status report and health checks.
+    Values are None for templates that haven't been uploaded yet.
+    """
+    from bot.config import TEMPLATE_POSTCARDS
+    return {
+        tmpl["id"]: get_template_file_id(tmpl["id"])
+        for tmpl in TEMPLATE_POSTCARDS
+    }
+
+
+def templates_are_ready() -> bool:
+    """Return True only if all 3 template file_ids are present in Redis.
+
+    Used by the inline handler to decide whether to show templates or
+    fall back to the switch_pm prompt.
+    """
+    return all(get_all_template_file_ids().values())
