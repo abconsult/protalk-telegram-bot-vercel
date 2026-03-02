@@ -7,7 +7,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import LabeledPrice, PreCheckoutQuery, CallbackQuery, BufferedInputFile, InlineQueryResultCachedPhoto
 from aiogram.utils.deep_linking import create_start_link
 
-from bot.config import ADMIN_ID, OCCASIONS, STYLES, FONTS_LIST, PACKAGES, YUKASSA_TOKEN, MAX_CUSTOM_TEXT_LENGTH
+from bot.config import ADMIN_ID, OCCASIONS, STYLES, FONTS_LIST, PACKAGES, YUKASSA_TOKEN, MAX_CUSTOM_TEXT_LENGTH, TEMPLATE_POSTCARDS
 from bot.database import (
     kv, credits_key, get_credits, set_user_state, get_user_state,
     add_credits, pending_key, pop_pending, save_pending,
@@ -97,45 +97,78 @@ def register_handlers(dp: Dispatcher, bot: Bot):
     
     @dp.inline_query()
     async def inline_query_handler(inline_query: types.InlineQuery):
+        """Show 3 template cards (from config) + user's saved postcards.
+
+        Usage pattern:
+            @Pozdravish_bot Маша
+        where "Маша" — имя адресата, которое мы подставляем в caption.
+        """
         name = inline_query.query.strip()
         user_id = inline_query.from_user.id
-        
+
+        # 1) Template postcards from config (with hardcoded file_id)
+        results = []
+        for idx, tmpl in enumerate(TEMPLATE_POSTCARDS):
+            file_id = tmpl.get("file_id") or ""
+            if not file_id:
+                # Skip not-yet-configured templates (no file_id provided)
+                continue
+
+            base_caption = tmpl.get("caption", "")
+            # Ensure base_caption is safe to index
+            base_caption = base_caption.strip()
+
+            if name:
+                final_caption = f"{name}, {base_caption}"
+            else:
+                final_caption = f"..., {base_caption}"
+
+            results.append(
+                InlineQueryResultCachedPhoto(
+                    id=f"tmpl-{idx}",
+                    photo_file_id=file_id,
+                    title=tmpl.get("title"),
+                    caption=final_caption,
+                )
+            )
+
+        # 2) User's saved postcards (personal gallery)
         postcards = get_postcards(user_id)
-        if not postcards:
+        for idx, pc in enumerate(postcards):
+            caption_text = (pc.get("caption") or "").strip()
+
+            if name:
+                # "Маша, поздравляю с ..."
+                final_caption = f"{name}, {caption_text}"
+            else:
+                final_caption = f"..., {caption_text}"
+
+            results.append(
+                InlineQueryResultCachedPhoto(
+                    id=f"user-{idx}",
+                    photo_file_id=pc["file_id"],
+                    caption=final_caption,
+                )
+            )
+
+        # If nothing to show yet (no templates configured and no postcards) —
+        # invite user to create a card via private chat.
+        if not results:
             await inline_query.answer(
                 results=[],
                 cache_time=1,
                 is_personal=True,
                 switch_pm_text="✨ Создать открытку",
-                switch_pm_parameter="create"
+                switch_pm_parameter="create",
             )
             return
 
-        results = []
-        for idx, pc in enumerate(postcards):
-            caption_text = pc.get("caption", "")
-            
-            if name:
-                first_letter = caption_text[0].lower() if caption_text else ""
-                rest = caption_text[1:] if len(caption_text) > 1 else ""
-                final_caption = f"{name}, {first_letter}{rest}"
-            else:
-                final_caption = f"..., {caption_text}"
-            
-            results.append(
-                InlineQueryResultCachedPhoto(
-                    id=str(idx),
-                    photo_file_id=pc['file_id'],
-                    caption=final_caption
-                )
-            )
-        
         await inline_query.answer(
             results,
             cache_time=1,
             is_personal=True,
             switch_pm_text="➕ Создать ещё",
-            switch_pm_parameter="create"
+            switch_pm_parameter="create",
         )
 
 
