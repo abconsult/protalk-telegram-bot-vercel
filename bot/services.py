@@ -38,6 +38,15 @@ _OCCASION_DISPLAY_MAP: dict[str, str] = {
     "завершение учёбы": "с Выпуском",
 }
 
+# Local caption fallback used when ProTalk text API times out
+_OCCASION_CAPTION_FALLBACK: dict[str, str] = {
+    "день рождения": "желаю счастья, здоровья и всего самого лучшего!",
+    "свадьбу": "желаю любви, гармонии и семейного счастья!",
+    "рождение ребёнка": "пусть малыш радует и растёт здоровым и любимым!",
+    "8 марта": "желаю радости, тепла и весны в душе!",
+    "завершение учёбы": "желаю яркого будущего и больших успехов!",
+}
+
 
 async def fetch_with_retry(
     url: str,
@@ -85,16 +94,14 @@ async def get_greeting_text_from_protalk(
         f"&output=text"
     )
 
-    logger.info(f"PROTALK TEXT: calling API for addressee='{addressee}' occasion='{occasion}'")
-    logger.info(f"PROTALK TEXT: prompt='{base_prompt[:120]}...'")
-
+    logger.info(f"PROTALK TEXT: calling for '{addressee}' / '{occasion}'")
     try:
-        timeout = aiohttp.ClientTimeout(total=25)
+        timeout = aiohttp.ClientTimeout(total=8)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            resp = await fetch_with_retry(protalk_url, session, retries=2, delay=3)
+            resp = await fetch_with_retry(protalk_url, session, retries=1, delay=0)
             raw = await resp.text()
 
-        logger.info(f"PROTALK TEXT: raw response='{raw[:300]}'")
+        logger.info(f"PROTALK TEXT: raw='{raw[:200]}'")
 
         try:
             result = json.loads(raw)
@@ -108,16 +115,43 @@ async def get_greeting_text_from_protalk(
             text = raw
 
         final = (text or "").strip() or fallback
-        logger.info(f"PROTALK TEXT: parsed='{final[:100]}'")
+        logger.info(f"PROTALK TEXT: result='{final[:80]}'")
         return final
 
     except Exception as e:
-        logger.error(f"PROTALK TEXT ERROR: {e}", exc_info=True)
+        logger.info(f"PROTALK TEXT ERROR: {type(e).__name__}: {e}")
         return fallback
 
 
+async def safe_greeting(
+    addressee: str,
+    occasion_text: str,
+    context: str | None,
+    timeout_secs: float = 8.0,
+) -> str:
+    """Call ProTalk text API with hard timeout; fall back to local text on timeout."""
+    local_fallback = _OCCASION_CAPTION_FALLBACK.get(
+        occasion_text.lower(),
+        "поздравляю с праздником!",
+    )
+    try:
+        result = await asyncio.wait_for(
+            get_greeting_text_from_protalk(
+                addressee=addressee,
+                occasion=occasion_text,
+                context=context,
+                fallback=local_fallback,
+            ),
+            timeout=timeout_secs,
+        )
+        return result
+    except asyncio.TimeoutError:
+        logger.info(f"PROTALK TEXT: timeout {timeout_secs}s — using local fallback")
+        return local_fallback
+
+
 def format_image_text(name: str, occasion: str = "", is_custom: bool = False) -> str:
-    """Text drawn on the image: '{Name}, {occasion greeting}!' or fallback."""
+    """Text drawn on the postcard image."""
     if not is_custom:
         display = _OCCASION_DISPLAY_MAP.get(occasion.lower())
         if display:
@@ -210,7 +244,6 @@ async def generate_postcard(
 
         prompt_template = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["Минимализм"])
         image_prompt = prompt_template.format(occasion=occasion_text)
-
         image_url = (
             "https://api.pro-talk.ru/api/v1.0/run_function_get"
             f"?function_id={PROTALK_FUNCTION_ID}"
@@ -220,27 +253,28 @@ async def generate_postcard(
             f"&output=image"
         )
 
+        timeout_img = aiohttp.ClientTimeout(total=25)
+
+        async def fetch_image() -> bytes:
+            async with aiohttp.ClientSession(timeout=timeout_img) as session:
+                resp = await fetch_with_retry(image_url, session, retries=3, delay=3)
+                return await resp.read()
+
         if text_mode == "ai":
-            # 1. Сначала получаем AI-текст отдельным запросом с логами
-            caption_for_db = await get_greeting_text_from_protalk(
-                addressee=addressee,
-                occasion=occasion_text,
-                context=text_input,
+            # Parallel: image + AI caption, caption capped at 8s
+            image_bytes, caption_for_db = await asyncio.gather(
+                fetch_image(),
+                safe_greeting(
+                    addressee=addressee,
+                    occasion_text=occasion_text,
+                    context=text_input,
+                    timeout_secs=8.0,
+                ),
             )
-            logger.info(f"POSTCARD: caption_for_db='{caption_for_db[:80]}'")
-
-            # 2. Затем генерируем картинку
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                resp = await fetch_with_retry(image_url, session, retries=3, delay=5)
-                image_bytes = await resp.read()
-
+            logger.info(f"POSTCARD: caption='{caption_for_db[:80]}'")
         else:
+            image_bytes = await fetch_image()
             caption_for_db = text_input.strip()
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                resp = await fetch_with_retry(image_url, session, retries=3, delay=5)
-                image_bytes = await resp.read()
 
         text_to_draw = format_image_text(addressee, occasion_text, is_custom)
         logger.info(f"POSTCARD: text_to_draw='{text_to_draw}'")
@@ -280,7 +314,8 @@ async def generate_postcard(
         )
         set_user_state(
             chat_id,
-            {"occasion": None, "style": None, "font": None, "text_mode": None, "ai_context": None, "addressee": None},
+            {"occasion": None, "style": None, "font": None, "text_mode": None,
+             "ai_context": None, "addressee": None},
         )
 
     finally:
