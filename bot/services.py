@@ -1,7 +1,6 @@
 import os
 import asyncio
 import json
-import io
 import urllib.parse
 import logging
 from io import BytesIO
@@ -29,10 +28,8 @@ from bot.database import (
 
 logger = logging.getLogger(__name__)
 
-# Prefix used in handlers.py when user enters a custom occasion
 CUSTOM_OCCASION_PREFIX = "✏️ "
 
-# Module-level constant — avoids recreating dict on every format_image_text call
 _OCCASION_DISPLAY_MAP: dict[str, str] = {
     "день рождения": "с Днём Рождения",
     "свадьбу": "с Днём Свадьбы",
@@ -48,19 +45,16 @@ async def fetch_with_retry(
     retries: int = 3,
     delay: int = 2,
 ) -> aiohttp.ClientResponse:
-    """Make HTTP GET with automatic retries on failure."""
     for attempt in range(retries):
         try:
             resp = await session.get(url)
             if resp.status == 200:
                 return resp
-            logger.warning(f"Attempt {attempt + 1}: status {resp.status} for {url}")
+            logger.warning(f"Attempt {attempt + 1}: status {resp.status}")
         except Exception as e:
             logger.warning(f"Attempt {attempt + 1}: exception: {e}")
-
         if attempt < retries - 1:
             await asyncio.sleep(delay)
-
     raise Exception(f"Failed to fetch after {retries} attempts: {url}")
 
 
@@ -70,19 +64,13 @@ async def get_greeting_text_from_protalk(
     context: str | None = None,
     fallback: str = "Поздравляю!",
 ) -> str:
-    """Fetch AI-generated greeting caption from ProTalk API.
-
-    addressee  – имя адресата (для тона обращения)
-    occasion   – повод ("день рождения", "8 марта", ...)
-    context    – то, что написал пользователь про пожелания / ситуацию
-    """
     base_prompt = (
         "Напиши короткое красивое поздравление на русском языке. "
         f"Получатель: {addressee}. "
         f"Повод: {occasion}. "
     )
     if context:
-        base_prompt += f"Дополнительные пожелания и контекст: {context}. "
+        base_prompt += f"Дополнительные пожелания: {context}. "
     base_prompt += (
         "Стиль: тёплый, искренний, 2-3 предложения максимум. "
         "Ответь ТОЛЬКО текстом поздравления, без кавычек и пояснений."
@@ -97,42 +85,49 @@ async def get_greeting_text_from_protalk(
         f"&output=text"
     )
 
+    logger.info(f"PROTALK TEXT: calling API for addressee='{addressee}' occasion='{occasion}'")
+    logger.info(f"PROTALK TEXT: prompt='{base_prompt[:120]}...'")
+
     try:
-        async with aiohttp.ClientSession() as session:
-            resp = await fetch_with_retry(protalk_url, session, retries=3)
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            resp = await fetch_with_retry(protalk_url, session, retries=2, delay=3)
             raw = await resp.text()
 
-            try:
-                result = json.loads(raw)
-                text = (
-                    (result.get("result") if isinstance(result, dict) else None)
-                    or (result.get("text") if isinstance(result, dict) else None)
-                    or (result.get("response") if isinstance(result, dict) else None)
-                    or (result if isinstance(result, str) else "")
-                )
-            except json.JSONDecodeError:
-                text = raw
+        logger.info(f"PROTALK TEXT: raw response='{raw[:300]}'")
 
-            return (text or "").strip() or fallback
+        try:
+            result = json.loads(raw)
+            text = (
+                (result.get("result") if isinstance(result, dict) else None)
+                or (result.get("text") if isinstance(result, dict) else None)
+                or (result.get("response") if isinstance(result, dict) else None)
+                or (result if isinstance(result, str) else "")
+            )
+        except json.JSONDecodeError:
+            text = raw
+
+        final = (text or "").strip() or fallback
+        logger.info(f"PROTALK TEXT: parsed='{final[:100]}'")
+        return final
 
     except Exception as e:
-        logger.error(f"get_greeting_text_from_protalk failed: {e}", exc_info=True)
+        logger.error(f"PROTALK TEXT ERROR: {e}", exc_info=True)
         return fallback
 
 
-def format_image_text(name: str) -> str:
-    """Text that will be drawn on the image itself.
-
-    По ТЗ: просто "{Имя}, поздравляю!" без деталей повода.
-    Все остальные пожелания идут в подпись (caption) под открыткой.
-    """
+def format_image_text(name: str, occasion: str = "", is_custom: bool = False) -> str:
+    """Text drawn on the image: '{Name}, {occasion greeting}!' or fallback."""
+    if not is_custom:
+        display = _OCCASION_DISPLAY_MAP.get(occasion.lower())
+        if display:
+            return f"{name}, {display}!"
     return f"{name}, поздравляю!"
 
 
 def wrap_text(
     text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.Draw
 ) -> str:
-    """Wrap text lines to fit within max_width pixels."""
     lines = []
     for block in text.split("\n"):
         words = block.split()
@@ -153,12 +148,8 @@ def wrap_text(
 
 
 def apply_text_to_image(img_bytes: bytes, text: str, font_name: str) -> bytes:
-    """Draw centred text with semi-transparent drop-shadow; return JPEG bytes."""
-    # Convert to RGBA for alpha-compositing (shadow transparency)
     image = Image.open(BytesIO(img_bytes)).convert("RGBA")
     width, height = image.size
-
-    # Draw on a transparent overlay so shadow is truly semi-transparent
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
@@ -179,15 +170,11 @@ def apply_text_to_image(img_bytes: bytes, text: str, font_name: str) -> bytes:
     text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = (width - text_w) // 2
     y = (height - text_h) // 2
-
     shadow = max(2, font_size // 20)
-    # FIX: draw on RGBA overlay — alpha value (160) now works correctly
     draw.text((x + shadow, y + shadow), wrapped, font=font, fill=(0, 0, 0, 160))
     draw.text((x, y), wrapped, font=font, fill=(255, 255, 255, 255))
 
-    # Composite overlay onto original, convert back to RGB for JPEG
     result_image = Image.alpha_composite(image, overlay).convert("RGB")
-
     output = BytesIO()
     result_image.save(output, format="JPEG", quality=92)
     return output.getvalue()
@@ -196,15 +183,13 @@ def apply_text_to_image(img_bytes: bytes, text: str, font_name: str) -> bytes:
 async def generate_postcard(
     chat_id: int, message: types.Message, payload: dict, bot: Bot
 ):
-    """Generate postcard image via ProTalk, overlay text and send to user."""
     occasion = payload["occasion"]
     style = payload["style"]
     font_name = payload.get("font", "Comfortaa")
     text_mode = payload.get("text_mode", "ai")
-    text_input = payload["text_input"]  # AI context or full custom text
+    text_input = payload["text_input"]  # ai_context or custom text
     addressee = payload.get("addressee", text_input)
 
-    # Define early to avoid NameError inside except block
     caption_for_db = text_input.strip()
 
     wait_msg = await message.answer(
@@ -212,7 +197,6 @@ async def generate_postcard(
     )
 
     try:
-        # FIX: use CUSTOM_OCCASION_PREFIX constant instead of unicode escape
         is_custom = occasion.startswith(CUSTOM_OCCASION_PREFIX)
         occasion_text = (
             occasion[len(CUSTOM_OCCASION_PREFIX):].strip()
@@ -221,6 +205,8 @@ async def generate_postcard(
                 (v for k, v in OCCASION_TEXT_MAP.items() if k in occasion), "праздник"
             )
         )
+
+        logger.info(f"POSTCARD: mode={text_mode} occasion='{occasion_text}' addressee='{addressee}'")
 
         prompt_template = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["Минимализм"])
         image_prompt = prompt_template.format(occasion=occasion_text)
@@ -234,30 +220,30 @@ async def generate_postcard(
             f"&output=image"
         )
 
-        async with aiohttp.ClientSession() as session:
+        if text_mode == "ai":
+            # 1. Сначала получаем AI-текст отдельным запросом с логами
+            caption_for_db = await get_greeting_text_from_protalk(
+                addressee=addressee,
+                occasion=occasion_text,
+                context=text_input,
+            )
+            logger.info(f"POSTCARD: caption_for_db='{caption_for_db[:80]}'")
 
-            async def fetch_image() -> bytes:
+            # 2. Затем генерируем картинку
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 resp = await fetch_with_retry(image_url, session, retries=3, delay=5)
-                return await resp.read()
+                image_bytes = await resp.read()
 
-            if text_mode == "ai":
-                # text_input здесь — это ai_context ("для кого и какие пожелания")
-                image_bytes, greeting_caption = await asyncio.gather(
-                    fetch_image(),
-                    get_greeting_text_from_protalk(
-                        addressee=addressee,
-                        occasion=occasion_text,
-                        context=text_input,
-                    ),
-                )
-                caption_for_db = greeting_caption
-            else:
-                # custom: text_input — полный текст поздравления
-                image_bytes = await fetch_image()
-                caption_for_db = text_input.strip()
+        else:
+            caption_for_db = text_input.strip()
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                resp = await fetch_with_retry(image_url, session, retries=3, delay=5)
+                image_bytes = await resp.read()
 
-        # Надпись на самой открытке: только имя адресата + "поздравляю!"
-        text_to_draw = format_image_text(addressee)
+        text_to_draw = format_image_text(addressee, occasion_text, is_custom)
+        logger.info(f"POSTCARD: text_to_draw='{text_to_draw}'")
         final_img_bytes = apply_text_to_image(image_bytes, text_to_draw, font_name)
 
         pm_caption = (
@@ -294,7 +280,7 @@ async def generate_postcard(
         )
         set_user_state(
             chat_id,
-            {"occasion": None, "style": None, "font": None, "text_mode": None},
+            {"occasion": None, "style": None, "font": None, "text_mode": None, "ai_context": None, "addressee": None},
         )
 
     finally:
