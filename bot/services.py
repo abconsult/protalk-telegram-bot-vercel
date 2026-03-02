@@ -65,14 +65,27 @@ async def fetch_with_retry(
 
 
 async def get_greeting_text_from_protalk(
-    name: str, occasion: str, fallback: str = "Поздравляю!"
+    addressee: str,
+    occasion: str,
+    context: str | None = None,
+    fallback: str = "Поздравляю!",
 ) -> str:
-    """Fetch AI-generated greeting caption from ProTalk API."""
-    meta_prompt = (
-        f"Напиши короткое красивое поздравление на русском языке. "
-        f"Получатель: {name}. Повод: {occasion}. "
-        f"Стиль: тёплый, искренний, 2-3 предложения максимум. "
-        f"Ответь ТОЛЬКО текстом поздравления, без кавычек и пояснений."
+    """Fetch AI-generated greeting caption from ProTalk API.
+
+    addressee  – имя адресата (для тона обращения)
+    occasion   – повод ("день рождения", "8 марта", ...)
+    context    – то, что написал пользователь про пожелания / ситуацию
+    """
+    base_prompt = (
+        "Напиши короткое красивое поздравление на русском языке. "
+        f"Получатель: {addressee}. "
+        f"Повод: {occasion}. "
+    )
+    if context:
+        base_prompt += f"Дополнительные пожелания и контекст: {context}. "
+    base_prompt += (
+        "Стиль: тёплый, искренний, 2-3 предложения максимум. "
+        "Ответь ТОЛЬКО текстом поздравления, без кавычек и пояснений."
     )
 
     protalk_url = (
@@ -80,7 +93,7 @@ async def get_greeting_text_from_protalk(
         f"?function_id={PROTALK_FUNCTION_ID}"
         f"&bot_id={PROTALK_BOT_ID}"
         f"&bot_token={PROTALK_TOKEN}"
-        f"&prompt={urllib.parse.quote(meta_prompt)}"
+        f"&prompt={urllib.parse.quote(base_prompt)}"
         f"&output=text"
     )
 
@@ -95,7 +108,6 @@ async def get_greeting_text_from_protalk(
                     (result.get("result") if isinstance(result, dict) else None)
                     or (result.get("text") if isinstance(result, dict) else None)
                     or (result.get("response") if isinstance(result, dict) else None)
-                    # FIX: use `result` (clean Python str), not `raw` (JSON with quotes)
                     or (result if isinstance(result, str) else "")
                 )
             except json.JSONDecodeError:
@@ -108,23 +120,12 @@ async def get_greeting_text_from_protalk(
         return fallback
 
 
-def format_image_text(name: str, occasion: str, is_custom: bool) -> str:
-    """Return greeting text for the image based on name, occasion and mode."""
-    if is_custom:
-        return f"{name}, поздравляю!"
+def format_image_text(name: str) -> str:
+    """Text that will be drawn on the image itself.
 
-    # Direct match on mapped occasion value (e.g. "день рождения")
-    display = _OCCASION_DISPLAY_MAP.get(occasion.lower())
-    if display:
-        return f"{name}, {display}!"
-
-    # Fallback: try matching full emoji key from OCCASION_TEXT_MAP
-    for emoji_key, val in OCCASION_TEXT_MAP.items():
-        if emoji_key == occasion or val == occasion:
-            d = _OCCASION_DISPLAY_MAP.get(val)
-            if d:
-                return f"{name}, {d}!"
-
+    По ТЗ: просто "{Имя}, поздравляю!" без деталей повода.
+    Все остальные пожелания идут в подпись (caption) под открыткой.
+    """
     return f"{name}, поздравляю!"
 
 
@@ -200,7 +201,7 @@ async def generate_postcard(
     style = payload["style"]
     font_name = payload.get("font", "Comfortaa")
     text_mode = payload.get("text_mode", "ai")
-    text_input = payload["text_input"]
+    text_input = payload["text_input"]  # AI context or full custom text
     addressee = payload.get("addressee", text_input)
 
     # Define early to avoid NameError inside except block
@@ -240,16 +241,23 @@ async def generate_postcard(
                 return await resp.read()
 
             if text_mode == "ai":
+                # text_input здесь — это ai_context ("для кого и какие пожелания")
                 image_bytes, greeting_caption = await asyncio.gather(
                     fetch_image(),
-                    get_greeting_text_from_protalk(addressee, occasion_text),
+                    get_greeting_text_from_protalk(
+                        addressee=addressee,
+                        occasion=occasion_text,
+                        context=text_input,
+                    ),
                 )
                 caption_for_db = greeting_caption
             else:
+                # custom: text_input — полный текст поздравления
                 image_bytes = await fetch_image()
                 caption_for_db = text_input.strip()
 
-        text_to_draw = format_image_text(addressee, occasion_text, is_custom)
+        # Надпись на самой открытке: только имя адресата + "поздравляю!"
+        text_to_draw = format_image_text(addressee)
         final_img_bytes = apply_text_to_image(image_bytes, text_to_draw, font_name)
 
         pm_caption = (
