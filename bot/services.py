@@ -202,15 +202,32 @@ async def get_image_from_kie(
         await asyncio.sleep(2)
         logger.info(f"KIE IMAGE: polling attempt {attempt + 1}/3")
         
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                f"https://api.kie.ai/api/v1/jobs/recordInfo?taskId={task_id}",
-                headers=headers,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(f"KIE IMAGE: poll failed {resp.status}")
-                    continue
-                status_result = await resp.json()
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    f"https://api.kie.ai/api/v1/jobs/recordInfo?taskId={task_id}",
+                    headers=headers,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"KIE IMAGE: poll failed {resp.status}")
+                        continue
+                    
+                    raw_text = await resp.text()
+                    logger.info(f"KIE IMAGE: raw response='{raw_text[:200]}'")
+                    
+                    try:
+                        status_result = json.loads(raw_text)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"KIE IMAGE: JSON decode error: {e}")
+                        logger.error(f"KIE IMAGE: raw text={raw_text}")
+                        continue
+        except Exception as e:
+            logger.warning(f"KIE IMAGE: polling exception: {type(e).__name__}: {e}")
+            continue
+        
+        if not status_result or not isinstance(status_result, dict):
+            logger.warning(f"KIE IMAGE: invalid response format: {status_result}")
+            continue
         
         state = status_result.get("data", {}).get("state")
         logger.info(f"KIE IMAGE: state={state}")
