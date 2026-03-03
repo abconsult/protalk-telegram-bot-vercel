@@ -99,7 +99,7 @@ async def get_greeting_text_from_protalk(
 
     logger.info(f"PROTALK TEXT: calling for '{addressee}' / '{occasion}'")
     try:
-        timeout = aiohttp.ClientTimeout(total=4)
+        timeout = aiohttp.ClientTimeout(total=5)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
                 f"https://api.pro-talk.ru/api/v1.0/ask/{PROTALK_TOKEN}",
@@ -131,7 +131,7 @@ async def safe_greeting(
     addressee: str,
     occasion_text: str,
     context: str | None,
-    timeout_secs: float = 4.0,
+    timeout_secs: float = 5.0,
 ) -> str:
     local_fallback = _OCCASION_CAPTION_FALLBACK.get(
         occasion_text.lower(),
@@ -359,7 +359,7 @@ def _fit_font_and_wrap(
     max_height = int(height * 0.48)
 
     for size in range(start_size, min_size - 1, -2):
-        font = _load_font(primary_font_path, fallback_font_path, size)
+        font = _load_font(primary_font_path, fallback_path, size)
         wrapped = wrap_text(text, font, max_width, draw)
         bbox = draw.textbbox((0, 0), wrapped, font=font, align="center")
         text_w = bbox[2] - bbox[0]
@@ -496,7 +496,7 @@ async def generate_postcard(
                     addressee=addressee,
                     occasion_text=occasion_text,
                     context=text_input,
-                    timeout_secs=4.0,
+                    timeout_secs=5.0,
                 ),
             )
             logger.info(f"POSTCARD: caption='{caption_for_db[:80]}'")
