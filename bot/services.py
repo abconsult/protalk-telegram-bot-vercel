@@ -100,7 +100,7 @@ async def get_greeting_text_from_protalk(
 
     logger.info(f"PROTALK TEXT: calling for '{addressee}' / '{occasion}'")
     try:
-        timeout = aiohttp.ClientTimeout(total=8)
+        timeout = aiohttp.ClientTimeout(total=4)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             resp = await fetch_with_retry(protalk_url, session, retries=1, delay=0)
             raw = await resp.text()
@@ -131,7 +131,7 @@ async def safe_greeting(
     addressee: str,
     occasion_text: str,
     context: str | None,
-    timeout_secs: float = 8.0,
+    timeout_secs: float = 4.0,
 ) -> str:
     local_fallback = _OCCASION_CAPTION_FALLBACK.get(
         occasion_text.lower(),
@@ -254,7 +254,7 @@ def _fit_font_and_wrap(
     max_height = int(height * 0.48)
 
     for size in range(start_size, min_size - 1, -2):
-        font = _load_font(primary_font_path, fallback_font_path, size)
+        font = _load_font(primary_font_path, fallback_path, size)
         wrapped = wrap_text(text, font, max_width, draw)
         bbox = draw.textbbox((0, 0), wrapped, font=font, align="center")
         text_w = bbox[2] - bbox[0]
@@ -389,11 +389,11 @@ async def generate_postcard(
             f"&output=image"
         )
 
-        timeout_img = aiohttp.ClientTimeout(total=25)
+        timeout_img = aiohttp.ClientTimeout(total=3)
 
         async def fetch_image() -> bytes:
             async with aiohttp.ClientSession(timeout=timeout_img) as session:
-                resp = await fetch_with_retry(image_url, session, retries=3, delay=3)
+                resp = await fetch_with_retry(image_url, session, retries=2, delay=1)
                 return await resp.read()
 
         if text_mode == "ai":
@@ -403,7 +403,7 @@ async def generate_postcard(
                     addressee=addressee,
                     occasion_text=occasion_text,
                     context=text_input,
-                    timeout_secs=8.0,
+                    timeout_secs=4.0,
                 ),
             )
             logger.info(f"POSTCARD: caption='{caption_for_db[:80]}'")
