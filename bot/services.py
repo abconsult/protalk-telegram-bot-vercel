@@ -14,6 +14,7 @@ from aiogram.types import BufferedInputFile
 
 from bot.config import (
     KIE_API_KEY,
+    WEBHOOK_URL,
     PROTALK_BOT_ID,
     PROTALK_TOKEN,
     STYLE_PROMPT_MAP,
@@ -26,6 +27,7 @@ from bot.database import (
     add_credits,
     set_user_state,
     save_postcard,
+    save_pending_image_task,
 )
 
 logger = logging.getLogger(__name__)
@@ -153,36 +155,44 @@ async def safe_greeting(
         return local_fallback
 
 
-async def get_image_from_kie(
+async def create_image_task_async(
     image_prompt: str,
-    chat_id_suffix: str,
-) -> bytes:
+    chat_id: int,
+    message_id: int,
+    payload: dict,
+    caption: str,
+) -> str:
     """
-    Generate image via Kie.ai z-image API.
-    Creates task, polls status twice (after 5s and 4s), downloads result.
+    Create async image generation task via Kie.ai z-image API.
+    Returns task_id, saves context to DB for callback processing.
     """
+    if not WEBHOOK_URL:
+        raise Exception("WEBHOOK_URL not configured")
+    
     headers = {
         "Authorization": f"Bearer {KIE_API_KEY}",
         "Content-Type": "application/json",
     }
     
-    payload = {
+    callback_url = f"{WEBHOOK_URL}/api/kie-callback"
+    
+    request_payload = {
         "model": "z-image",
+        "callBackUrl": callback_url,
         "input": {
             "prompt": image_prompt,
             "aspect_ratio": "1:1",
         },
     }
 
-    logger.info(f"KIE IMAGE: creating task with z-image")
+    logger.info(f"KIE IMAGE: creating async task with z-image, callback={callback_url}")
     
-    # Step 1: Create task
     timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(
             "https://api.kie.ai/api/v1/jobs/createTask",
             headers=headers,
-            json=payload,
+            json=request_payload,
         ) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
@@ -197,94 +207,27 @@ async def get_image_from_kie(
     
     logger.info(f"KIE IMAGE: task created, taskId={task_id}")
     
-    # Step 2: Poll task status (2 attempts: 5s + 4s)
-    polling_delays = [5, 4]
+    # Save context for callback
+    save_pending_image_task(
+        task_id=task_id,
+        data={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "payload": payload,
+            "caption_for_db": caption,
+        },
+        ttl=300,  # 5 minutes
+    )
     
-    for attempt, delay in enumerate(polling_delays, start=1):
-        await asyncio.sleep(delay)
-        logger.info(f"KIE IMAGE: polling attempt {attempt}/{len(polling_delays)}")
-        
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                    f"https://api.kie.ai/api/v1/jobs/recordInfo?taskId={task_id}",
-                    headers=headers,
-                ) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"KIE IMAGE: poll failed {resp.status}")
-                        if attempt == len(polling_delays):
-                            raise Exception(f"Polling failed with status {resp.status}")
-                        continue
-                    
-                    raw_text = await resp.text()
-                    logger.info(f"KIE IMAGE: raw response='{raw_text[:200]}'")
-                    
-                    try:
-                        status_result = json.loads(raw_text)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"KIE IMAGE: JSON decode error: {e}")
-                        logger.error(f"KIE IMAGE: raw text={raw_text}")
-                        if attempt == len(polling_delays):
-                            raise Exception("Invalid JSON response from Kie.ai")
-                        continue
-        except Exception as e:
-            logger.warning(f"KIE IMAGE: polling exception: {type(e).__name__}: {e}")
-            if attempt == len(polling_delays):
-                raise
-            continue
-        
-        if not status_result or not isinstance(status_result, dict):
-            logger.warning(f"KIE IMAGE: invalid response format: {status_result}")
-            if attempt == len(polling_delays):
-                raise Exception("Invalid response format from Kie.ai")
-            continue
-        
-        # Handle case when data is null (image not ready yet)
-        data = status_result.get("data")
-        if data is None:
-            logger.warning(f"KIE IMAGE: data is null on attempt {attempt}/{len(polling_delays)}")
-            if attempt == len(polling_delays):
-                raise Exception("Image generation timeout (9 seconds)")
-            continue
-        
-        state = data.get("state")
-        logger.info(f"KIE IMAGE: state={state}")
-        
-        if state == "success":
-            # Parse resultJson string to get URLs
-            result_json_str = data.get("resultJson", "{}")
-            try:
-                result_json = json.loads(result_json_str) if isinstance(result_json_str, str) else result_json_str
-            except json.JSONDecodeError:
-                logger.error(f"KIE IMAGE: failed to parse resultJson: {result_json_str}")
-                raise Exception("Invalid resultJson format")
-            
-            result_urls = result_json.get("resultUrls", [])
-            
-            if not result_urls:
-                logger.error(f"KIE IMAGE: no resultUrls in response")
-                raise Exception("No image URL in Kie.ai response")
-            
-            image_url = result_urls[0]
-            logger.info(f"KIE IMAGE: success! URL={image_url}")
-            
-            # Step 3: Download image
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                resp = await fetch_with_retry(image_url, session, retries=2, delay=1)
-                return await resp.read()
-        
-        elif state == "fail":
-            fail_msg = data.get("failMsg", "Unknown error")
-            fail_code = data.get("failCode", "N/A")
-            logger.error(f"KIE IMAGE: generation failed: [{fail_code}] {fail_msg}")
-            raise Exception(f"Image generation failed: {fail_msg}")
-        
-        # If state is not success or fail, continue to next attempt
-        logger.warning(f"KIE IMAGE: unexpected state={state}, continuing...")
-    
-    # Timeout after all attempts
-    logger.error(f"KIE IMAGE: timeout after {len(polling_delays)} attempts (9 seconds total)")
-    raise Exception("Image generation timeout (9 seconds)")
+    return task_id
+
+
+async def download_image(image_url: str) -> bytes:
+    """Download image from URL."""
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        resp = await fetch_with_retry(image_url, session, retries=2, delay=1)
+        return await resp.read()
 
 
 def format_image_text(name: str, occasion: str = "", is_custom: bool = False) -> str:
@@ -484,6 +427,7 @@ def _friendly_error(e: Exception) -> str:
 async def generate_postcard(
     chat_id: int, message: types.Message, payload: dict, bot: Bot
 ):
+    """Generate postcard asynchronously using callback workflow."""
     occasion = payload["occasion"]
     style = payload["style"]
     font_name = payload.get("font", "Comfortaa")
@@ -494,11 +438,8 @@ async def generate_postcard(
     caption_for_db = text_input.strip()
 
     wait_msg = await message.answer(
-        "⏳ Рисую открытку, это может занять до 10 секунд. Подождите..."
+        "⏳ Генерирую открытку... Пожалуйста, подождите."
     )
-
-    stop_action = asyncio.Event()
-    action_task = asyncio.create_task(_keep_uploading(bot, chat_id, stop_action))
 
     try:
         is_custom = occasion.startswith(CUSTOM_OCCASION_PREFIX)
@@ -515,62 +456,36 @@ async def generate_postcard(
         prompt_template = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["Минимализм"])
         image_prompt = prompt_template.format(occasion=occasion_text)
 
+        # Generate caption if needed
         if text_mode == "ai":
-            image_bytes, caption_for_db = await asyncio.gather(
-                get_image_from_kie(
-                    image_prompt=image_prompt,
-                    chat_id_suffix=f"{chat_id}_{style}_{occasion_text}",
-                ),
-                safe_greeting(
-                    addressee=addressee,
-                    occasion_text=occasion_text,
-                    context=text_input,
-                    timeout_secs=5.0,
-                ),
+            caption_for_db = await safe_greeting(
+                addressee=addressee,
+                occasion_text=occasion_text,
+                context=text_input,
+                timeout_secs=5.0,
             )
             logger.info(f"POSTCARD: caption='{caption_for_db[:80]}'")
         else:
-            image_bytes = await get_image_from_kie(
-                image_prompt=image_prompt,
-                chat_id_suffix=f"{chat_id}_{style}_{occasion_text}",
-            )
             caption_for_db = text_input.strip()
 
-        text_to_draw = format_image_text(addressee, occasion_text, is_custom)
-        logger.info(f"POSTCARD: text_to_draw='{text_to_draw}'")
-        final_img_bytes = apply_text_to_image(image_bytes, text_to_draw, font_name)
-
-        pm_caption = (
-            f"..., {caption_for_db}\n\n"
-            f"\U0001f4a1 <b>Открытка готова!</b>\n"
-            f"Чтобы отправить её с именем, напишите в любом чате:\n"
-            f"<code>@pozdravish_bot Имя</code>"
+        # Create async image generation task
+        task_id = await create_image_task_async(
+            image_prompt=image_prompt,
+            chat_id=chat_id,
+            message_id=wait_msg.message_id,
+            payload=payload,
+            caption=caption_for_db,
         )
-
-        msg = await message.answer_photo(
-            photo=BufferedInputFile(final_img_bytes, filename="postcard.jpg"),
-            caption=pm_caption,
-            parse_mode="HTML",
-        )
-
-        if msg and msg.photo:
-            save_postcard(chat_id, msg.photo[-1].file_id, caption_for_db)
-
-        increment_generations()
-        add_credits(chat_id, -1)
-
-        credits = get_credits(chat_id)
-        await message.answer(
-            f"Осталось бесплатных открыток: <b>{credits}</b>", parse_mode="HTML"
-        )
+        
+        logger.info(f"POSTCARD: async task created, taskId={task_id}, waiting for callback")
 
     except Exception as e:
         logger.error(f"generate_postcard error: {e}", exc_info=True)
         friendly = _friendly_error(e)
-        await message.answer(
-            f"\U0001f614 Нейросеть сейчас перегружена — не удалось сгенерировать открытку.\n"
+        await wait_msg.edit_text(
+            f"\U0001f614 Не удалось создать задачу генерации.\n"
             f"<b>Причина:</b> {friendly}\n"
-            f"Ваш кредит <b>не списан</b>. Попробуйте ещё раз через пару минут.",
+            f"Ваш кредит <b>не списан</b>. Попробуйте ещё раз.",
             parse_mode="HTML",
         )
         set_user_state(
@@ -579,14 +494,132 @@ async def generate_postcard(
              "ai_context": None, "addressee": None},
         )
 
-    finally:
-        stop_action.set()
-        action_task.cancel()
+
+async def process_kie_callback(
+    task_id: str,
+    state: str,
+    result_json: dict,
+    fail_msg: str | None,
+    bot: Bot,
+) -> bool:
+    """Process Kie.ai callback and send postcard to user.
+    
+    Returns:
+        True if processed successfully, False otherwise
+    """
+    from bot.database import get_pending_image_task
+    
+    # Get saved context
+    task_data = get_pending_image_task(task_id)
+    if not task_data:
+        logger.warning(f"KIE CALLBACK: no data found for taskId={task_id}")
+        return False
+    
+    chat_id = task_data["chat_id"]
+    message_id = task_data["message_id"]
+    payload = task_data["payload"]
+    caption_for_db = task_data["caption_for_db"]
+    
+    logger.info(f"KIE CALLBACK: processing taskId={task_id}, state={state}, chat_id={chat_id}")
+    
+    try:
+        if state == "success":
+            result_urls = result_json.get("resultUrls", [])
+            if not result_urls:
+                logger.error(f"KIE CALLBACK: no resultUrls in response")
+                await bot.edit_message_text(
+                    "❌ Ошибка: нет URL изображения",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+                return False
+            
+            image_url = result_urls[0]
+            logger.info(f"KIE CALLBACK: downloading image from {image_url}")
+            
+            # Download image
+            image_bytes = await download_image(image_url)
+            
+            # Apply text overlay
+            addressee = payload.get("addressee", payload["text_input"])
+            occasion = payload["occasion"]
+            font_name = payload.get("font", "Comfortaa")
+            
+            is_custom = occasion.startswith(CUSTOM_OCCASION_PREFIX)
+            occasion_text = (
+                occasion[len(CUSTOM_OCCASION_PREFIX):].strip()
+                if is_custom
+                else next(
+                    (v for k, v in OCCASION_TEXT_MAP.items() if k in occasion), "праздник"
+                )
+            )
+            
+            text_to_draw = format_image_text(addressee, occasion_text, is_custom)
+            logger.info(f"KIE CALLBACK: applying text '{text_to_draw}'")
+            final_img_bytes = apply_text_to_image(image_bytes, text_to_draw, font_name)
+            
+            # Delete waiting message
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+            
+            # Send postcard
+            pm_caption = (
+                f"..., {caption_for_db}\n\n"
+                f"\U0001f4a1 <b>Открытка готова!</b>\n"
+                f"Чтобы отправить её с именем, напишите в любом чате:\n"
+                f"<code>@pozdravish_bot Имя</code>"
+            )
+            
+            msg = await bot.send_photo(
+                chat_id=chat_id,
+                photo=BufferedInputFile(final_img_bytes, filename="postcard.jpg"),
+                caption=pm_caption,
+                parse_mode="HTML",
+            )
+            
+            if msg and msg.photo:
+                save_postcard(chat_id, msg.photo[-1].file_id, caption_for_db)
+            
+            increment_generations()
+            add_credits(chat_id, -1)
+            
+            credits = get_credits(chat_id)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Осталось бесплатных открыток: <b>{credits}</b>",
+                parse_mode="HTML",
+            )
+            
+            logger.info(f"KIE CALLBACK: postcard sent successfully to chat_id={chat_id}")
+            return True
+            
+        elif state == "fail":
+            logger.error(f"KIE CALLBACK: generation failed: {fail_msg}")
+            await bot.edit_message_text(
+                f"\U0001f614 Нейросеть не смогла сгенерировать открытку.\n"
+                f"Ваш кредит <b>не списан</b>. Попробуйте ещё раз.",
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode="HTML",
+            )
+            return False
+        
+        else:
+            logger.warning(f"KIE CALLBACK: unexpected state={state}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"KIE CALLBACK: error processing callback: {e}", exc_info=True)
         try:
-            await action_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await wait_msg.delete()
+            await bot.edit_message_text(
+                f"\U0001f614 Ошибка при обработке результата.\n"
+                f"Ваш кредит <b>не списан</b>.",
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode="HTML",
+            )
         except Exception:
             pass
+        return False
