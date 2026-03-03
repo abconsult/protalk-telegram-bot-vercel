@@ -106,10 +106,9 @@ STYLE_PROMPT_MAP = {
 # Template postcards — 3 permanent cards always available in inline mode.
 #
 # Как заполнить file_id:
-#   1. Отправьте готовое изображение любым ботом (например, через @RawDataBot) или
-#      перешлите фото в чат с основным ботом.
-#   2. Скопируйте file_id из ответа Telegram и вставьте вместо заглушки "".
-#   3. Шаблон с пустым file_id автоматически пропускается в inline-результатах.
+#   1. Отправьте готовое изображение в чат с ботом @Pozdravish_bot.
+#   2. Перешлите изображение из чата боту @JsonDumpBot
+#   3. Скопируйте file_id из JSON-ответа бота и вставьте вместо заглушки "".
 #
 # Формат caption: начинается со строчной буквы — inline-обработчик
 # подставляет имя адресата перед ним:
@@ -140,5 +139,14 @@ TEMPLATE_POSTCARDS = [
         "file_id": "AgACAgIAAxkBAAEbpndppV7QJdgEn1WIy5Gq1CqpsUK0ugACeBVrG4CCMUmsC5oRdnAPXwEAAwIAA3gAAzoE",
         "caption": "поздравляю с праздником Весны! "
                    "Пусть каждый день приносит радость и улыбки! 🎉",
+    },
+
+    {
+        "id":      "birthday-1",
+        "title":   "🎂 День Рождения",
+        # ↓↓↓ вставьте реальный Telegram file_id вместо пустой строки
+        "file_id": "AgACAgIAAxkBAAEbsclppvznjCygUGmLKr7G9AsAAd31BKEAAtoYaxsU4TlJaRSHnFY4x2YBAAMCAAN5AAM6BA",
+        "caption": "поздравляю с Днём Рождения! "
+                   "Удачи, радости, любви и счастья! 🎉",
     },
 ]
