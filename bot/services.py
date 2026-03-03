@@ -13,9 +13,9 @@ from aiogram import Bot, types
 from aiogram.types import BufferedInputFile
 
 from bot.config import (
+    KIE_API_KEY,
     PROTALK_BOT_ID,
     PROTALK_TOKEN,
-    PROTALK_FUNCTION_ID,
     STYLE_PROMPT_MAP,
     FONTS_FILES,
     OCCASION_TEXT_MAP,
@@ -153,60 +153,92 @@ async def safe_greeting(
         return local_fallback
 
 
-async def get_image_from_protalk(
+async def get_image_from_kie(
     image_prompt: str,
     chat_id_suffix: str,
 ) -> bytes:
     """
-    Request ProTalk bot to generate image via function.
-    Returns image bytes.
+    Generate image via Kie.ai Flux Kontext Pro API.
+    Creates task, polls status 3 times (2s intervals), downloads result.
     """
-    message = (
-        f'Выполни функцию №{PROTALK_FUNCTION_ID} с параметрами '
-        f'"prompt": "{image_prompt}", "aspect_ratio": "1:1", '
-        f'и в качестве результата работы функции пришли ссылку на изображение вида "https://image.jpg".'
-    )
-
+    headers = {
+        "Authorization": f"Bearer {KIE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    
     payload = {
-        "bot_id": int(PROTALK_BOT_ID),
-        "chat_id": f"postcard_image_{chat_id_suffix}",
-        "message": message,
+        "prompt": image_prompt,
+        "aspectRatio": "1:1",
+        "model": "flux-kontext-pro",
+        "width": 1024,
+        "height": 1024,
     }
 
-    logger.info(f"PROTALK IMAGE: requesting via function №{PROTALK_FUNCTION_ID}")
-    timeout = aiohttp.ClientTimeout(total=10)
-
+    logger.info(f"KIE IMAGE: creating task with Flux Kontext Pro")
+    
+    # Step 1: Create task
+    timeout = aiohttp.ClientTimeout(total=8)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(
-            f"https://api.pro-talk.ru/api/v1.0/ask/{PROTALK_TOKEN}",
+            "https://api.kie.ai/api/v1/flux/kontext/generate",
+            headers=headers,
             json=payload,
         ) as resp:
             if resp.status != 200:
-                raise Exception(f"ProTalk API returned {resp.status}")
-            raw = await resp.text()
-
-    logger.info(f"PROTALK IMAGE: raw='{raw[:300]}'")
-
-    try:
-        result = json.loads(raw)
-        response_text = result.get("done", "")
-    except (json.JSONDecodeError, AttributeError):
-        response_text = raw
-
-    # Extract image URL from response
-    import re
-    url_match = re.search(r'https?://[^\s"\')]+\.(jpg|jpeg|png|webp)', response_text, re.IGNORECASE)
-    if not url_match:
-        logger.error(f"PROTALK IMAGE: no image URL found in response")
-        raise Exception("No image URL in ProTalk response")
-
-    image_url = url_match.group(0)
-    logger.info(f"PROTALK IMAGE: extracted URL={image_url}")
-
-    # Download image
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        resp = await fetch_with_retry(image_url, session, retries=1, delay=0)
-        return await resp.read()
+                error_text = await resp.text()
+                logger.error(f"KIE IMAGE: create task failed {resp.status}: {error_text}")
+                raise Exception(f"Kie.ai API returned {resp.status}")
+            result = await resp.json()
+    
+    task_id = result.get("data", {}).get("taskId")
+    if not task_id:
+        logger.error(f"KIE IMAGE: no taskId in response: {result}")
+        raise Exception("No taskId in Kie.ai response")
+    
+    logger.info(f"KIE IMAGE: task created, taskId={task_id}")
+    
+    # Step 2: Poll task status (3 attempts × 2 seconds)
+    for attempt in range(3):
+        await asyncio.sleep(2)
+        logger.info(f"KIE IMAGE: polling attempt {attempt + 1}/3")
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"https://api.kie.ai/api/v1/jobs/recordInfo?taskId={task_id}",
+                headers=headers,
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"KIE IMAGE: poll failed {resp.status}")
+                    continue
+                status_result = await resp.json()
+        
+        state = status_result.get("data", {}).get("state")
+        logger.info(f"KIE IMAGE: state={state}")
+        
+        if state == "success":
+            result_json = status_result.get("data", {}).get("resultJson", {})
+            result_urls = result_json.get("resultUrls", [])
+            
+            if not result_urls:
+                logger.error(f"KIE IMAGE: no resultUrls in response")
+                raise Exception("No image URL in Kie.ai response")
+            
+            image_url = result_urls[0]
+            logger.info(f"KIE IMAGE: success! URL={image_url}")
+            
+            # Step 3: Download image
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                resp = await fetch_with_retry(image_url, session, retries=1, delay=0)
+                return await resp.read()
+        
+        elif state == "fail":
+            error_msg = status_result.get("data", {}).get("errorMessage", "Unknown error")
+            logger.error(f"KIE IMAGE: generation failed: {error_msg}")
+            raise Exception(f"Image generation failed: {error_msg}")
+    
+    # Timeout after 3 polling attempts
+    logger.error(f"KIE IMAGE: timeout after 3 polling attempts")
+    raise Exception("Image generation timeout (6 seconds)")
 
 
 def format_image_text(name: str, occasion: str = "", is_custom: bool = False) -> str:
@@ -416,7 +448,7 @@ async def generate_postcard(
     caption_for_db = text_input.strip()
 
     wait_msg = await message.answer(
-        "⏳ Рисую открытку, это может занять до минуты. Подождите..."
+        "⏳ Рисую открытку, это может занять до 10 секунд. Подождите..."
     )
 
     stop_action = asyncio.Event()
@@ -439,7 +471,7 @@ async def generate_postcard(
 
         if text_mode == "ai":
             image_bytes, caption_for_db = await asyncio.gather(
-                get_image_from_protalk(
+                get_image_from_kie(
                     image_prompt=image_prompt,
                     chat_id_suffix=f"{chat_id}_{style}_{occasion_text}",
                 ),
@@ -452,7 +484,7 @@ async def generate_postcard(
             )
             logger.info(f"POSTCARD: caption='{caption_for_db[:80]}'")
         else:
-            image_bytes = await get_image_from_protalk(
+            image_bytes = await get_image_from_kie(
                 image_prompt=image_prompt,
                 chat_id_suffix=f"{chat_id}_{style}_{occasion_text}",
             )
