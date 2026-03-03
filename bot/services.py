@@ -158,8 +158,8 @@ async def get_image_from_kie(
     chat_id_suffix: str,
 ) -> bytes:
     """
-    Generate image via Kie.ai Flux Kontext Pro API.
-    Creates task, polls status twice (after 7s and 5s), downloads result.
+    Generate image via Kie.ai z-image API.
+    Creates task, polls status twice (after 5s and 4s), downloads result.
     """
     headers = {
         "Authorization": f"Bearer {KIE_API_KEY}",
@@ -167,20 +167,20 @@ async def get_image_from_kie(
     }
     
     payload = {
-        "prompt": image_prompt,
-        "aspectRatio": "1:1",
-        "model": "flux-kontext-pro",
-        "width": 1024,
-        "height": 1024,
+        "model": "z-image",
+        "input": {
+            "prompt": image_prompt,
+            "aspect_ratio": "1:1",
+        },
     }
 
-    logger.info(f"KIE IMAGE: creating task with Flux Kontext Pro")
+    logger.info(f"KIE IMAGE: creating task with z-image")
     
     # Step 1: Create task
-    timeout = aiohttp.ClientTimeout(total=8)
+    timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(
-            "https://api.kie.ai/api/v1/flux/kontext/generate",
+            "https://api.kie.ai/api/v1/jobs/createTask",
             headers=headers,
             json=payload,
         ) as resp:
@@ -197,8 +197,8 @@ async def get_image_from_kie(
     
     logger.info(f"KIE IMAGE: task created, taskId={task_id}")
     
-    # Step 2: Poll task status (2 attempts: 7s + 5s)
-    polling_delays = [7, 5]
+    # Step 2: Poll task status (2 attempts: 5s + 4s)
+    polling_delays = [5, 4]
     
     for attempt, delay in enumerate(polling_delays, start=1):
         await asyncio.sleep(delay)
@@ -244,14 +244,21 @@ async def get_image_from_kie(
         if data is None:
             logger.warning(f"KIE IMAGE: data is null on attempt {attempt}/{len(polling_delays)}")
             if attempt == len(polling_delays):
-                raise Exception("Image generation timeout (12 seconds)")
+                raise Exception("Image generation timeout (9 seconds)")
             continue
         
         state = data.get("state")
         logger.info(f"KIE IMAGE: state={state}")
         
         if state == "success":
-            result_json = data.get("resultJson", {})
+            # Parse resultJson string to get URLs
+            result_json_str = data.get("resultJson", "{}")
+            try:
+                result_json = json.loads(result_json_str) if isinstance(result_json_str, str) else result_json_str
+            except json.JSONDecodeError:
+                logger.error(f"KIE IMAGE: failed to parse resultJson: {result_json_str}")
+                raise Exception("Invalid resultJson format")
+            
             result_urls = result_json.get("resultUrls", [])
             
             if not result_urls:
@@ -263,20 +270,21 @@ async def get_image_from_kie(
             
             # Step 3: Download image
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                resp = await fetch_with_retry(image_url, session, retries=1, delay=0)
+                resp = await fetch_with_retry(image_url, session, retries=2, delay=1)
                 return await resp.read()
         
         elif state == "fail":
-            error_msg = data.get("errorMessage", "Unknown error")
-            logger.error(f"KIE IMAGE: generation failed: {error_msg}")
-            raise Exception(f"Image generation failed: {error_msg}")
+            fail_msg = data.get("failMsg", "Unknown error")
+            fail_code = data.get("failCode", "N/A")
+            logger.error(f"KIE IMAGE: generation failed: [{fail_code}] {fail_msg}")
+            raise Exception(f"Image generation failed: {fail_msg}")
         
         # If state is not success or fail, continue to next attempt
         logger.warning(f"KIE IMAGE: unexpected state={state}, continuing...")
     
     # Timeout after all attempts
-    logger.error(f"KIE IMAGE: timeout after {len(polling_delays)} attempts (12 seconds total)")
-    raise Exception("Image generation timeout (12 seconds)")
+    logger.error(f"KIE IMAGE: timeout after {len(polling_delays)} attempts (9 seconds total)")
+    raise Exception("Image generation timeout (9 seconds)")
 
 
 def format_image_text(name: str, occasion: str = "", is_custom: bool = False) -> str:
