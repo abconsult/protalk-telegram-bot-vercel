@@ -174,7 +174,7 @@ async def get_image_from_protalk(
     }
 
     logger.info(f"PROTALK IMAGE: requesting via function №{PROTALK_FUNCTION_ID}")
-    timeout = aiohttp.ClientTimeout(total=8)
+    timeout = aiohttp.ClientTimeout(total=10)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(
@@ -310,7 +310,7 @@ def _fit_font_and_wrap(
     max_height = int(height * 0.48)
 
     for size in range(start_size, min_size - 1, -2):
-        font = _load_font(primary_font_path, fallback_path, size)
+        font = _load_font(primary_font_path, fallback_font_path, size)
         wrapped = wrap_text(text, font, max_width, draw)
         bbox = draw.textbbox((0, 0), wrapped, font=font, align="center")
         text_w = bbox[2] - bbox[0]
@@ -318,7 +318,7 @@ def _fit_font_and_wrap(
         if text_w <= max_width and text_h <= max_height:
             return font, wrapped
 
-    font = _load_font(primary_font_path, fallback_path, min_size)
+    font = _load_font(primary_font_path, fallback_font_path, min_size)
     return font, wrap_text(text, font, max_width, draw)
 
 
