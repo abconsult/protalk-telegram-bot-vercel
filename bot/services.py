@@ -331,7 +331,7 @@ def _fit_font_and_wrap(
     max_height = int(height * 0.48)
 
     for size in range(start_size, min_size - 1, -2):
-        font = _load_font(primary_font_path, fallback_path, size)
+        font = _load_font(primary_font_path, fallback_font_path, size)
         wrapped = wrap_text(text, font, max_width, draw)
         bbox = draw.textbbox((0, 0), wrapped, font=font, align="center")
         text_w = bbox[2] - bbox[0]
