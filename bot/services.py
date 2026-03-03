@@ -158,11 +158,11 @@ async def get_image_from_protalk(
     chat_id_suffix: str,
 ) -> bytes:
     """
-    Request ProTalk bot to generate image via function z_image.
+    Request ProTalk bot to generate image via function.
     Returns image bytes.
     """
     message = (
-        f'Выполни функцию №{PROTALK_FUNCTION_ID} - z_image - с параметрами '
+        f'Выполни функцию №{PROTALK_FUNCTION_ID} с параметрами '
         f'"prompt": "{image_prompt}", "aspect_ratio": "1:1", '
         f'и в качестве результата работы функции пришли ссылку на изображение вида "https://image.jpg".'
     )
