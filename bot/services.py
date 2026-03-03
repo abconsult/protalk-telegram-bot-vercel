@@ -4,6 +4,7 @@ import json
 import urllib.parse
 import logging
 import re
+import traceback
 from io import BytesIO
 
 import aiohttp
@@ -65,7 +66,8 @@ async def fetch_with_retry(
                 return resp
             logger.warning(f"Attempt {attempt + 1}: status {resp.status}")
         except Exception as e:
-            logger.warning(f"Attempt {attempt + 1}: exception: {e}")
+            logger.warning(f"Attempt {attempt + 1}: {type(e).__name__}: {e}")
+            logger.warning(traceback.format_exc())
         if attempt < retries - 1:
             await asyncio.sleep(delay)
     raise Exception(f"Failed to fetch after {retries} attempts")
