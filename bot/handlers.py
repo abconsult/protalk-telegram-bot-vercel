@@ -38,6 +38,16 @@ DEFAULT_STATE = {
 
 def register_handlers(dp: Dispatcher, bot: Bot):
 
+    # ---------------- GLOBAL ERROR HANDLER ----------------
+
+    @dp.error()
+    async def global_error_handler(event: types.ErrorEvent):
+        logger.error(
+            f"Handler error on update {event.update.update_id}: "
+            f"{type(event.exception).__name__}: {event.exception}",
+            exc_info=event.exception,
+        )
+
     # ---------------- ADMIN PANEL ----------------
 
     @dp.message(Command("stats"))
