@@ -23,7 +23,6 @@ _REQUIRED_ENV = [
     "WEBHOOK_SECRET",
     "WEBHOOK_URL",
     "KIE_API_KEY",
-    "OPENROUTER_API_KEY",
     "UPSTASH_REDIS_REST_URL",
     "UPSTASH_REDIS_REST_TOKEN",
     "ADMIN_ID",
@@ -31,6 +30,10 @@ _REQUIRED_ENV = [
 _missing = [v for v in _REQUIRED_ENV if not os.getenv(v)]
 if _missing:
     raise RuntimeError(f"Missing required environment variables: {', '.join(_missing)}")
+
+# Optional but recommended — warn if absent so greeting text falls back to local strings
+if not os.getenv("OPENROUTER_API_KEY"):
+    logger.warning("OPENROUTER_API_KEY is not set — AI greeting text will use local fallbacks")
 
 # Инициализируем бота и диспетчер
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
