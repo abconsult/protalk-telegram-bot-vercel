@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# Validate required env vars at startup so misconfigured deploys fail loudly
+_REQUIRED_ENV = [
+    "TELEGRAM_BOT_TOKEN",
+    "WEBHOOK_SECRET",
+    "WEBHOOK_URL",
+    "KIE_API_KEY",
+    "OPENROUTER_API_KEY",
+    "UPSTASH_REDIS_REST_URL",
+    "UPSTASH_REDIS_REST_TOKEN",
+    "ADMIN_ID",
+]
+_missing = [v for v in _REQUIRED_ENV if not os.getenv(v)]
+if _missing:
+    raise RuntimeError(f"Missing required environment variables: {', '.join(_missing)}")
+
 # Инициализируем бота и диспетчер
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp  = Dispatcher()

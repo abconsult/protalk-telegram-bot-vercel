@@ -15,8 +15,8 @@ from aiogram.types import BufferedInputFile
 from bot.config import (
     KIE_API_KEY,
     WEBHOOK_URL,
-    PROTALK_BOT_ID,
-    PROTALK_TOKEN,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
     STYLE_PROMPT_MAP,
     FONTS_FILES,
     OCCASION_TEXT_MAP,
@@ -75,57 +75,58 @@ async def fetch_with_retry(
     raise Exception(f"Failed to fetch after {retries} attempts")
 
 
-async def get_greeting_text_from_protalk(
+async def get_greeting_text(
     addressee: str,
     occasion: str,
     context: str | None = None,
     fallback: str = "Поздравляю!",
 ) -> str:
-    base_prompt = (
+    """Generate a personalized greeting via OpenRouter (Claude Haiku by default)."""
+    prompt = (
         "Напиши короткое красивое поздравление на русском языке. "
         f"Получатель: {addressee}. "
         f"Повод: {occasion}. "
     )
     if context:
-        base_prompt += f"Дополнительные пожелания: {context}. "
-    base_prompt += (
+        prompt += f"Дополнительные пожелания: {context}. "
+    prompt += (
         "Стиль: тёплый, искренний, 2-3 предложения максимум. "
         "Ответь ТОЛЬКО текстом поздравления, без кавычек и пояснений."
     )
 
     payload = {
-        "bot_id": int(PROTALK_BOT_ID),
-        "chat_id": f"postcard_text_{addressee}_{occasion}",
-        "message": base_prompt,
+        "model": OPENROUTER_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 200,
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
     }
 
-    logger.info(f"PROTALK TEXT: calling for '{addressee}' / '{occasion}'")
+    logger.info(f"OPENROUTER TEXT: calling for '{addressee}' / '{occasion}'")
     try:
-        timeout = aiohttp.ClientTimeout(total=5)
+        timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
-                f"https://api.pro-talk.ru/api/v1.0/ask/{PROTALK_TOKEN}",
+                "https://openrouter.ai/api/v1/chat/completions",
                 json=payload,
+                headers=headers,
             ) as resp:
                 if resp.status != 200:
-                    logger.warning(f"PROTALK TEXT: status {resp.status}")
+                    logger.warning(f"OPENROUTER TEXT: status {resp.status}")
                     return fallback
                 raw = await resp.text()
 
-        logger.info(f"PROTALK TEXT: raw='{raw[:200]}'")
-
-        try:
-            result = json.loads(raw)
-            text = result.get("done", "").strip()
-        except (json.JSONDecodeError, AttributeError):
-            text = ""
-
+        logger.info(f"OPENROUTER TEXT: raw='{raw[:200]}'")
+        result = json.loads(raw)
+        text = result["choices"][0]["message"]["content"].strip()
         final = text or fallback
-        logger.info(f"PROTALK TEXT: result='{final[:80]}'")
+        logger.info(f"OPENROUTER TEXT: result='{final[:80]}'")
         return final
 
     except Exception as e:
-        logger.info(f"PROTALK TEXT ERROR: {type(e).__name__}: {e}")
+        logger.info(f"OPENROUTER TEXT ERROR: {type(e).__name__}: {e}")
         return fallback
 
 
@@ -141,7 +142,7 @@ async def safe_greeting(
     )
     try:
         result = await asyncio.wait_for(
-            get_greeting_text_from_protalk(
+            get_greeting_text(
                 addressee=addressee,
                 occasion=occasion_text,
                 context=context,

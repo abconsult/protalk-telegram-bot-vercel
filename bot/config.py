@@ -4,11 +4,11 @@ TELEGRAM_BOT_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_SECRET       = os.getenv("WEBHOOK_SECRET", "")  # Used to secure Telegram Webhook endpoint
 WEBHOOK_URL          = os.getenv("WEBHOOK_URL", "")  # Base URL for callbacks (e.g., https://your-domain.vercel.app)
 KIE_API_KEY          = os.getenv("KIE_API_KEY", "")
-PROTALK_BOT_ID       = os.getenv("PROTALK_BOT_ID", "23141")
-PROTALK_TOKEN        = os.getenv("PROTALK_TOKEN", "")
-PROTALK_FUNCTION_ID  = os.getenv("PROTALK_FUNCTION_ID", "609")
+OPENROUTER_API_KEY   = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL     = os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-4-5:free")
 YUKASSA_TOKEN        = os.getenv("YUKASSA_PROVIDER_TOKEN", "")
-ADMIN_ID             = int(os.getenv("ADMIN_ID", "128247430"))
+_admin_id_str        = os.getenv("ADMIN_ID", "")
+ADMIN_ID             = int(_admin_id_str) if _admin_id_str else 0  # 0 = no admin if var unset
 
 FREE_CREDITS = 3
 MAX_CUSTOM_TEXT_LENGTH = 300  # Maximum characters allowed for custom greeting text

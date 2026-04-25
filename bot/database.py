@@ -45,9 +45,15 @@ def get_credits(user_id: int) -> int:
     return int(val)
 
 def add_credits(user_id: int, amount: int) -> int:
-    current = get_credits(user_id)
-    new_val = current + amount
-    kv.set(credits_key(user_id), new_val)
+    key = credits_key(user_id)
+    # Ensure key exists before atomic INCRBY (new users initialised by get_credits)
+    if kv.get(key) is None:
+        kv.set(key, FREE_CREDITS)
+    new_val = int(kv.incrby(key, amount))
+    if new_val < 0:
+        # Roll back below-zero result to 0
+        kv.incrby(key, -new_val)
+        return 0
     return new_val
 
 
@@ -217,9 +223,9 @@ def templates_are_ready() -> bool:
 # Pending image generation tasks (async callback workflow)
 # ---------------------------------------------------------------------------
 
-def save_pending_image_task(task_id: str, data: dict, ttl: int = 300) -> None:
+def save_pending_image_task(task_id: str, data: dict, ttl: int = 900) -> None:
     """Save pending image generation task data.
-    
+
     Args:
         task_id: Kie.ai task ID
         data: Dictionary containing:
@@ -227,7 +233,7 @@ def save_pending_image_task(task_id: str, data: dict, ttl: int = 300) -> None:
             - message_id: ID of the waiting message
             - payload: Generation parameters (occasion, style, font, etc.)
             - caption_for_db: Generated or user-provided caption
-        ttl: Time to live in seconds (default 5 minutes)
+        ttl: Time to live in seconds (default 15 minutes)
     """
     key = pending_image_key(task_id)
     kv.setex(key, ttl, json.dumps(data))

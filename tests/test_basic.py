@@ -7,22 +7,28 @@ from bot.services import (
     format_image_text,
     apply_text_to_image,
     wrap_text,
-    get_greeting_text_from_protalk,
+    get_greeting_text,
 )
 from bot.config import OCCASION_TEXT_MAP
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 def _patched_session(response_text: str):
-    """Return a context manager that patches aiohttp.ClientSession."""
+    """Return a context manager that patches aiohttp.ClientSession.
+
+    The ProTalk client uses ``async with session.post(...) as resp``, so we
+    wire up mock_resp as an async context manager and attach it to .post().
+    """
     mock_resp = MagicMock()
     mock_resp.status = 200
     mock_resp.text = AsyncMock(return_value=response_text)
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
 
     mock_session = MagicMock()
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=False)
-    mock_session.get = AsyncMock(return_value=mock_resp)
+    mock_session.post = MagicMock(return_value=mock_resp)
 
     return patch("bot.services.aiohttp.ClientSession", return_value=mock_session)
 
@@ -34,9 +40,13 @@ def test_format_image_text_custom():
 
 
 def test_format_image_text_standard():
-    """Standard occasions are mapped to localised greeting strings."""
-    assert format_image_text("Мария", "день рождения", is_custom=False) == "Мария, с Днём Рождения!"
-    assert format_image_text("Алексей", "свадьбу", is_custom=False) == "Алексей, с Днём Свадьбы!"
+    """Standard occasions are mapped to localised greeting strings.
+
+    Spaces inside the display phrase are replaced with non-breaking spaces
+    (\u00a0) so the overlay renderer keeps phrases on one line.
+    """
+    assert format_image_text("Мария", "день рождения", is_custom=False) == "Мария, с\u00a0Днём\u00a0Рождения!"
+    assert format_image_text("Алексей", "свадьбу", is_custom=False) == "Алексей, с\u00a0Днём\u00a0Свадьбы!"
 
 
 def test_format_image_text_fallback():
@@ -46,12 +56,13 @@ def test_format_image_text_fallback():
 
 def test_format_image_text_all_standard_occasions():
     """All occasions in _OCCASION_DISPLAY_MAP are handled correctly."""
+    # Spaces inside display phrases are non-breaking (\u00a0) — see format_image_text
     cases = {
-        "день рождения": "с Днём Рождения",
-        "свадьбу": "с Днём Свадьбы",
-        "рождение ребёнка": "с Новорожденным",
-        "8 марта": "с 8 Марта",
-        "завершение учёбы": "с Выпуском",
+        "день рождения": "с\u00a0Днём\u00a0Рождения",
+        "свадьбу": "с\u00a0Днём\u00a0Свадьбы",
+        "рождение ребёнка": "с\u00a0Новорожденным",
+        "8 марта": "с\u00a08\u00a0Марта",
+        "завершение учёбы": "с\u00a0Выпуском",
     }
     for occasion, expected_suffix in cases.items():
         result = format_image_text("Тест", occasion, is_custom=False)
@@ -113,7 +124,15 @@ def test_wrap_text_forces_newline():
     assert "\n" in result
 
 
-# ── get_greeting_text_from_protalk ────────────────────────────────────────────────
+# ── get_greeting_text (OpenRouter) ───────────────────────────────────────────────
+def _openrouter_response(text: str) -> str:
+    """Build a minimal OpenAI-compatible Chat Completions JSON response."""
+    import json as _json
+    return _json.dumps({
+        "choices": [{"message": {"content": text}}]
+    })
+
+
 @pytest.mark.asyncio
 async def test_get_greeting_text_fallback_on_network_error():
     """Returns fallback string when network raises an exception."""
@@ -122,31 +141,31 @@ async def test_get_greeting_text_fallback_on_network_error():
         instance.__aenter__ = AsyncMock(side_effect=Exception("Network unreachable"))
         instance.__aexit__ = AsyncMock(return_value=False)
         MockSession.return_value = instance
-        result = await get_greeting_text_from_protalk(
+        result = await get_greeting_text(
             "Иван", "день рождения", fallback="Поздравляю!"
         )
         assert result == "Поздравляю!"
 
 
 @pytest.mark.asyncio
-async def test_get_greeting_text_json_dict_text_key():
-    """Correctly extracts 'text' field from JSON dict response."""
-    with _patched_session('{"text": "Желаю счастья и здоровья!"}'):
-        result = await get_greeting_text_from_protalk("Мария", "свадьбу")
+async def test_get_greeting_text_success():
+    """Correctly extracts text from OpenRouter Chat Completions response."""
+    with _patched_session(_openrouter_response("Желаю счастья и здоровья!")):
+        result = await get_greeting_text("Мария", "свадьбу")
         assert result == "Желаю счастья и здоровья!"
 
 
 @pytest.mark.asyncio
-async def test_get_greeting_text_plain_string_response():
-    """Correctly handles raw plain-text response (no JSON wrapping)."""
-    with _patched_session("Поздравляю от всей души!"):
-        result = await get_greeting_text_from_protalk("Олег", "8 марта")
-        assert result == "Поздравляю от всей души!"
-
-
-@pytest.mark.asyncio
-async def test_get_greeting_text_json_string_unwrap():
-    """Correctly unwraps a JSON-encoded plain string (result is str, not dict)."""
-    with _patched_session('"\u041fросто строка без словаря"'):
-        result = await get_greeting_text_from_protalk("Олег", "8 марта")
-        assert result == "Просто строка без словаря"
+async def test_get_greeting_text_fallback_on_non_200():
+    """Returns fallback when OpenRouter responds with non-200 status."""
+    mock_resp = MagicMock()
+    mock_resp.status = 429
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_session = MagicMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.post = MagicMock(return_value=mock_resp)
+    with patch("bot.services.aiohttp.ClientSession", return_value=mock_session):
+        result = await get_greeting_text("Олег", "8 марта", fallback="Поздравляю!")
+        assert result == "Поздравляю!"

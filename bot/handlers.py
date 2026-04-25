@@ -71,7 +71,7 @@ def register_handlers(dp: Dispatcher, bot: Bot):
         success, failed = 0, 0
         for uid in users:
             try:
-                await bot.send_message(uid, text_to_send)
+                await bot.send_message(uid, text_to_send, parse_mode=None)
                 success += 1
                 await asyncio.sleep(0.05)
             except Exception as e:
