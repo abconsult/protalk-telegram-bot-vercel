@@ -25,13 +25,14 @@ _REQUIRED_ENV = [
     "KIE_API_KEY",
     "UPSTASH_REDIS_REST_URL",
     "UPSTASH_REDIS_REST_TOKEN",
-    "ADMIN_ID",
 ]
 _missing = [v for v in _REQUIRED_ENV if not os.getenv(v)]
 if _missing:
     raise RuntimeError(f"Missing required environment variables: {', '.join(_missing)}")
 
-# Optional but recommended — warn if absent so greeting text falls back to local strings
+# Optional vars — warn if absent but don't crash
+if not os.getenv("ADMIN_ID"):
+    logger.warning("ADMIN_ID is not set — admin commands (/stats, /broadcast) will be disabled")
 if not os.getenv("OPENROUTER_API_KEY"):
     logger.warning("OPENROUTER_API_KEY is not set — AI greeting text will use local fallbacks")
 

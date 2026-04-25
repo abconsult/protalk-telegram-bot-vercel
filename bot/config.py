@@ -8,7 +8,10 @@ OPENROUTER_API_KEY   = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL     = os.getenv("OPENROUTER_MODEL", "anthropic/claude-haiku-4-5:free")
 YUKASSA_TOKEN        = os.getenv("YUKASSA_PROVIDER_TOKEN", "")
 _admin_id_str        = os.getenv("ADMIN_ID", "")
-ADMIN_ID             = int(_admin_id_str) if _admin_id_str else 0  # 0 = no admin if var unset
+try:
+    ADMIN_ID = int(_admin_id_str)
+except (ValueError, TypeError):
+    ADMIN_ID = 0  # 0 = admin commands disabled
 
 FREE_CREDITS = 3
 MAX_CUSTOM_TEXT_LENGTH = 300  # Maximum characters allowed for custom greeting text
